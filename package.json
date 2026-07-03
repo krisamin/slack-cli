@@ -1,0 +1,25 @@
+{
+  "name": "@krisamin/slack-cli",
+  "version": "0.2.0",
+  "description": "Slack CLI on top of your browser session — read threads, download files, stage reply drafts",
+  "license": "MIT",
+  "author": "krisamin",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/krisamin/slack-cli.git"
+  },
+  "type": "module",
+  "bin": {
+    "slack": "src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src/",
+    "format": "biome check --write src/"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.2",
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.7.0"
+  }
+}
