@@ -25,6 +25,14 @@ const flag = (input: Record<string, unknown>, key: string): boolean => {
   return input[key] === true;
 };
 
+/** Undefined rather than an empty array, so an omitted list stays omitted. */
+const stringList = (input: Record<string, unknown>, key: string): string[] | undefined => {
+  const value = input[key];
+  if (!Array.isArray(value)) return undefined;
+  const list = value.filter((item): item is string => typeof item === "string" && item.length > 0);
+  return list.length ? list : undefined;
+};
+
 const PROFILE_PROPERTY = {
   profile: {
     type: "string",
@@ -68,11 +76,18 @@ export const TOOL_LIST: ToolDefinition[] = [
   },
   {
     name: "thread_file",
-    description: "Download every attachment in a Slack thread and report where each file was saved.",
+    description:
+      "Download attachments from a Slack thread and report where each file was saved. Downloads everything unless file_id_list narrows it.",
     inputSchema: {
       type: "object",
       properties: {
         ...URL_PROPERTY,
+        file_id_list: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Download only these attachments, by the id thread_read prints next to each file. Slack names are not unique, so the id is the only way to name one screenshot among several.",
+        },
         out: {
           type: "string",
           description: "Directory to save into. Defaults to /tmp/slack-files-<thread ts>.",
@@ -81,11 +96,14 @@ export const TOOL_LIST: ToolDefinition[] = [
       },
       required: ["url"],
     },
-    run: (input) =>
-      file(requiredString(input, "url"), {
+    run: (input) => {
+      const fileIdList = stringList(input, "file_id_list");
+      return file(requiredString(input, "url"), {
         profile: optionalString(input, "profile"),
         out: optionalString(input, "out"),
-      }),
+        ...(fileIdList ? { fileIdList } : {}),
+      });
+    },
   },
   {
     name: "draft_write",

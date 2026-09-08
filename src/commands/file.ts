@@ -5,16 +5,38 @@ import type { SlackFile } from "../render";
 import { parseSlackUrl } from "../url";
 import { fetchThread } from "./read";
 
-/** Download every attachment in a thread. url_private requires the xoxc token + d cookie. */
-export const file = async (url: string, opts: { profile?: string; out?: string }): Promise<string> => {
+/**
+ * Download attachments from a thread. url_private requires the xoxc token + d
+ * cookie.
+ *
+ * fileIdList narrows it to specific attachments. Slack names are not unique —
+ * a thread of screenshots is a stack of "image.png" — so the id printed by
+ * `slack read` is the only way to name one of them.
+ */
+export const file = async (
+  url: string,
+  opts: { profile?: string; out?: string; fileIdList?: string[] },
+): Promise<string> => {
   const config = await loadConfig();
   const { profile } = resolveProfile(config, opts.profile);
   const parsed = parseSlackUrl(url);
   if (!parsed.threadTs) throw new Error("URL has no message ts.");
 
   const messages = await fetchThread(profile, parsed.channelId, parsed.threadTs);
-  const fileList: SlackFile[] = messages.flatMap((m) => m.files ?? []);
-  if (!fileList.length) return "No attachments in this thread.";
+  const threadFileList: SlackFile[] = messages.flatMap((m) => m.files ?? []);
+  if (!threadFileList.length) return "No attachments in this thread.";
+
+  const wanted = opts.fileIdList;
+  const fileList = wanted ? threadFileList.filter((entry) => entry.id && wanted.includes(entry.id)) : threadFileList;
+  if (wanted) {
+    // An id that matches nothing is a mistake worth naming: downloading zero
+    // files and reporting success reads as "the thread had no attachments".
+    const missingList = wanted.filter((id) => !threadFileList.some((entry) => entry.id === id));
+    if (missingList.length) {
+      const available = threadFileList.map((entry) => `${entry.id ?? "(no id)"} ${entry.name ?? ""}`.trim()).join(", ");
+      throw new Error(`Not in this thread: ${missingList.join(", ")}. Available: ${available}`);
+    }
+  }
 
   const outDir = opts.out ?? join("/tmp", `slack-files-${parsed.threadTs.replace(".", "")}`);
   mkdirSync(outDir, { recursive: true });

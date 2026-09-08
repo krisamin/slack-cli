@@ -53,6 +53,10 @@ slack read <url> --json   # raw message JSON
 # download every attachment in a thread
 slack file <url> --out ./downloads
 
+# ...or just the ones you want. Slack names are not unique, so `slack read`
+# prints each attachment's id next to it: `file: image.png (image/png, F0ABC123)`
+slack file <url> --file-id-list F0ABC123,F0DEF456
+
 # stage a reply draft
 slack draft write <url> -m "Looking into it."
 slack draft write <url> -f reply.txt
@@ -73,7 +77,7 @@ can read threads and stage drafts without shelling out to the CLI.
 | tool | arguments |
 | --- | --- |
 | `thread_read` | `url`, `json`, `profile` |
-| `thread_file` | `url`, `out`, `profile` |
+| `thread_file` | `url`, `file_id_list`, `out`, `profile` |
 | `draft_write` | `url`, `message`, `broadcast`, `profile` |
 | `draft_list` | `json`, `profile` |
 | `draft_rm` | `draft_id`, `profile` |

@@ -15,7 +15,9 @@ Usage:
       --cookie <xoxd-...>   d cookie (prompted if omitted, URL-encoded automatically)
       --default             make this the default profile
   slack read <url> [--json]                  print a thread with all replies
-  slack file <url> [--out <dir>]             download thread attachments (default: /tmp)
+  slack file <url> [--out <dir>] [--file-id-list <id,id>]
+                                             download thread attachments (default: /tmp)
+                                             ids come from the file lines in 'slack read'
   slack draft write <url> [-m <text> | -f <file>] [--broadcast]
                                              stage a reply draft (stdin works too)
   slack draft list [--json]                  list pending drafts
@@ -31,7 +33,7 @@ Config: ~/.config/slack-cli/config.json
 `;
 
 /** Flags that consume the next argument as their value. Everything else is boolean. */
-const VALUE_FLAGS = new Set(["profile", "token", "cookie", "out"]);
+const VALUE_FLAGS = new Set(["profile", "token", "cookie", "out", "file-id-list"]);
 
 interface ParsedArgs {
   positional: string[];
@@ -127,8 +129,18 @@ const main = async (): Promise<void> => {
     }
     case "file": {
       const url = rest[0];
-      if (!url) throw new Error("Usage: slack file <url> [--out <dir>]");
-      console.log(await file(url, { profile: str(flags.profile), out: str(flags.out) }));
+      if (!url) throw new Error("Usage: slack file <url> [--out <dir>] [--file-id-list <id,id>]");
+      const idList = str(flags["file-id-list"])
+        ?.split(",")
+        .map((id) => id.trim())
+        .filter(Boolean);
+      console.log(
+        await file(url, {
+          profile: str(flags.profile),
+          out: str(flags.out),
+          ...(idList?.length ? { fileIdList: idList } : {}),
+        }),
+      );
       break;
     }
     case "draft": {

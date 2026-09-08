@@ -112,7 +112,11 @@ export const renderMessage = (msg: SlackMessage, users: Map<string, UserInfo>): 
   }
 
   for (const file of msg.files ?? []) {
-    lines.push(c("dim", `  └ file: ${file.name ?? "(unnamed)"}${file.mimetype ? ` (${file.mimetype})` : ""}`));
+    // The id is part of the line because names collide: a thread of screenshots
+    // is a stack of "image.png", and without the id there is no way to say which
+    // one you mean, or to pass one to `slack file --file-id-list`.
+    const meta = [file.mimetype, file.id].filter(Boolean).join(", ");
+    lines.push(c("dim", `  └ file: ${file.name ?? "(unnamed)"}${meta ? ` (${meta})` : ""}`));
   }
 
   for (const att of msg.attachments ?? []) {
