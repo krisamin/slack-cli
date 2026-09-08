@@ -40,7 +40,12 @@ export const fetchThread = async (
   return messages;
 };
 
-export const read = async (url: string, opts: { profile?: string; json: boolean }): Promise<void> => {
+/**
+ * Render a thread. Returns the text instead of printing it: the CLI writes it to
+ * stdout, the MCP server hands it back as tool content. Nothing here may print,
+ * because under the MCP stdio transport stdout carries JSON-RPC frames only.
+ */
+export const read = async (url: string, opts: { profile?: string; json: boolean }): Promise<string> => {
   const config = await loadConfig();
   const { name, profile } = resolveProfile(config, opts.profile);
   const parsed = parseSlackUrl(url);
@@ -48,10 +53,7 @@ export const read = async (url: string, opts: { profile?: string; json: boolean 
 
   const messages = await fetchThread(profile, parsed.channelId, parsed.threadTs);
 
-  if (opts.json) {
-    console.log(JSON.stringify(messages, null, 2));
-    return;
-  }
+  if (opts.json) return JSON.stringify(messages, null, 2);
 
   const resolver = new UserResolver(profile, name);
   await resolver.load();
@@ -69,14 +71,12 @@ export const read = async (url: string, opts: { profile?: string; json: boolean 
   }
 
   const [root, ...replies] = messages;
-  console.log(header(`${channelLabel} · ${replies.length} replies`));
-  console.log();
+  const out: string[] = [header(`${channelLabel} · ${replies.length} replies`), ""];
   if (root) {
-    console.log(renderMessage(root, users));
-    console.log();
+    out.push(renderMessage(root, users), "");
   }
   for (const msg of replies) {
-    console.log(renderMessage(msg, users));
-    console.log();
+    out.push(renderMessage(msg, users), "");
   }
+  return out.join("\n").trimEnd();
 };

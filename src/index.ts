@@ -4,6 +4,7 @@ import { authSet, authTest } from "./commands/auth";
 import { draftList, draftRemove, draftWrite } from "./commands/draft";
 import { file } from "./commands/file";
 import { read } from "./commands/read";
+import { runMcp } from "./mcp/server";
 
 const HELP = `slack — Slack CLI that runs on your browser session (xoxc token + xoxd cookie)
 
@@ -19,6 +20,7 @@ Usage:
                                              stage a reply draft (stdin works too)
   slack draft list [--json]                  list pending drafts
   slack draft rm <draft_id>                  delete a draft
+  slack mcp                                  serve the same commands as MCP tools over stdio
 
 Options:
   --profile <name>   profile to use (default: config default, or $SLACK_PROFILE)
@@ -74,6 +76,18 @@ const str = (value: string | boolean | undefined): string | undefined => {
   return typeof value === "string" ? value : undefined;
 };
 
+/**
+ * Draft body from -m, -f or a pipe. This lives in the CLI and not in the draft
+ * command because the MCP server passes the text straight in: under stdio,
+ * stdin carries JSON-RPC frames and reading it would eat the protocol.
+ */
+const resolveBody = async (message?: string, filePath?: string): Promise<string> => {
+  if (message !== undefined) return message;
+  if (filePath !== undefined) return (await Bun.file(filePath).text()).trimEnd();
+  if (!process.stdin.isTTY) return (await Bun.stdin.text()).trimEnd();
+  throw new Error("No message body. Pass -m <text>, -f <file>, or pipe via stdin.");
+};
+
 const main = async (): Promise<void> => {
   const { positional, flags } = parseArgs(process.argv.slice(2));
   const [command, ...rest] = positional;
@@ -92,27 +106,29 @@ const main = async (): Promise<void> => {
       if (rest[0] === "set") {
         const profileName = str(flags.profile);
         if (!profileName) throw new Error("--profile <name> is required.");
-        await authSet({
-          profile: profileName,
-          token: str(flags.token),
-          cookie: str(flags.cookie),
-          setDefault: flags.default === true,
-        });
+        console.log(
+          await authSet({
+            profile: profileName,
+            token: str(flags.token),
+            cookie: str(flags.cookie),
+            setDefault: flags.default === true,
+          }),
+        );
       } else {
-        await authTest(str(flags.profile));
+        console.log(await authTest(str(flags.profile)));
       }
       break;
     }
     case "read": {
       const url = rest[0];
       if (!url) throw new Error("Usage: slack read <url>");
-      await read(url, { profile: str(flags.profile), json: flags.json === true });
+      console.log(await read(url, { profile: str(flags.profile), json: flags.json === true }));
       break;
     }
     case "file": {
       const url = rest[0];
       if (!url) throw new Error("Usage: slack file <url> [--out <dir>]");
-      await file(url, { profile: str(flags.profile), out: str(flags.out) });
+      console.log(await file(url, { profile: str(flags.profile), out: str(flags.out) }));
       break;
     }
     case "draft": {
@@ -120,21 +136,26 @@ const main = async (): Promise<void> => {
       if (sub === "write") {
         const url = rest[1];
         if (!url) throw new Error("Usage: slack draft write <url> [-m <text> | -f <file>]");
-        await draftWrite(url, {
-          profile: str(flags.profile),
-          message: str(flags.message),
-          file: str(flags.file),
-          broadcast: flags.broadcast === true,
-        });
+        console.log(
+          await draftWrite(url, {
+            profile: str(flags.profile),
+            text: await resolveBody(str(flags.message), str(flags.file)),
+            broadcast: flags.broadcast === true,
+          }),
+        );
       } else if (sub === "list") {
-        await draftList({ profile: str(flags.profile), json: flags.json === true });
+        console.log(await draftList({ profile: str(flags.profile), json: flags.json === true }));
       } else if (sub === "rm") {
         const draftId = rest[1];
         if (!draftId) throw new Error("Usage: slack draft rm <draft_id>");
-        await draftRemove(draftId, { profile: str(flags.profile) });
+        console.log(await draftRemove(draftId, { profile: str(flags.profile) }));
       } else {
         throw new Error(`Unknown draft subcommand: ${sub ?? "(none)"} — expected write, list, or rm.`);
       }
+      break;
+    }
+    case "mcp": {
+      await runMcp();
       break;
     }
     default:

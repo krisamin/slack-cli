@@ -40,24 +40,20 @@ const draftText = (draft: Draft): string => {
   return parts.join("");
 };
 
+/**
+ * Stage a draft. The body arrives as plain text: reading it from a file or stdin
+ * is the CLI's job, because under the MCP stdio transport stdin carries JSON-RPC
+ * frames and touching it would eat the protocol.
+ */
 export const draftWrite = async (
   url: string,
-  opts: { profile?: string; message?: string; file?: string; broadcast: boolean },
-): Promise<void> => {
+  opts: { profile?: string; text: string; broadcast: boolean },
+): Promise<string> => {
   const config = await loadConfig();
   const { profile } = resolveProfile(config, opts.profile);
   const parsed = parseSlackUrl(url);
 
-  let text: string;
-  if (opts.message !== undefined) {
-    text = opts.message;
-  } else if (opts.file !== undefined) {
-    text = (await Bun.file(opts.file).text()).trimEnd();
-  } else if (!process.stdin.isTTY) {
-    text = (await Bun.stdin.text()).trimEnd();
-  } else {
-    throw new Error("No message body. Pass -m <text>, -f <file>, or pipe via stdin.");
-  }
+  const text = opts.text.trimEnd();
   if (!text) throw new Error("Message body is empty.");
 
   const destination: Record<string, unknown> = { channel_id: parsed.channelId, broadcast: opts.broadcast };
@@ -86,42 +82,41 @@ export const draftWrite = async (
     is_from_composer: "false",
   });
 
-  console.log(`✓ draft created (id: ${res.draft.id})`);
-  console.log(`  target: ${parsed.channelId}${isReply ? ` thread ${parsed.threadTs}` : " (channel message)"}`);
-  console.log("  Review and send it from Slack.");
+  return [
+    `✓ draft created (id: ${res.draft.id})`,
+    `  target: ${parsed.channelId}${isReply ? ` thread ${parsed.threadTs}` : " (channel message)"}`,
+    "  Review and send it from Slack.",
+  ].join("\n");
 };
 
-export const draftList = async (opts: { profile?: string; json: boolean }): Promise<void> => {
+export const draftList = async (opts: { profile?: string; json: boolean }): Promise<string> => {
   const config = await loadConfig();
   const { profile } = resolveProfile(config, opts.profile);
   const res = await slackApi<DraftsListResponse>(profile, "drafts.list");
   const drafts = (res.drafts ?? []).filter((d) => !d.is_deleted && !d.is_sent);
 
-  if (opts.json) {
-    console.log(JSON.stringify(drafts, null, 2));
-    return;
-  }
+  if (opts.json) return JSON.stringify(drafts, null, 2);
+  if (drafts.length === 0) return "No drafts.";
 
-  if (drafts.length === 0) {
-    console.log("No drafts.");
-    return;
-  }
-
-  console.log(header(`${drafts.length} draft${drafts.length > 1 ? "s" : ""}`));
+  const out: string[] = [header(`${drafts.length} draft${drafts.length > 1 ? "s" : ""}`)];
   for (const draft of drafts) {
     const dest = draft.destinations?.[0];
     const target = dest?.thread_ts
       ? `${dest.channel_id} thread ${dest.thread_ts}`
       : (dest?.channel_id ?? "(no destination)");
     const preview = draftText(draft).replace(/\n/g, " ").slice(0, 60);
-    console.log(`\n${draft.id}`);
-    console.log(`  target : ${target}`);
-    console.log(`  updated: ${formatTs(draft.last_updated_ts)}`);
-    console.log(`  text   : ${preview}${preview.length >= 60 ? "…" : ""}`);
+    out.push(
+      "",
+      draft.id,
+      `  target : ${target}`,
+      `  updated: ${formatTs(draft.last_updated_ts)}`,
+      `  text   : ${preview}${preview.length >= 60 ? "…" : ""}`,
+    );
   }
+  return out.join("\n");
 };
 
-export const draftRemove = async (draftId: string, opts: { profile?: string }): Promise<void> => {
+export const draftRemove = async (draftId: string, opts: { profile?: string }): Promise<string> => {
   const config = await loadConfig();
   const { profile } = resolveProfile(config, opts.profile);
   // Future timestamp bypasses draft_has_conflict when the Slack app has touched the draft
@@ -130,5 +125,5 @@ export const draftRemove = async (draftId: string, opts: { profile?: string }): 
     draft_id: draftId,
     client_last_updated_ts: futureTs,
   });
-  console.log(`✓ draft deleted (${draftId})`);
+  return `✓ draft deleted (${draftId})`;
 };

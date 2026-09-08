@@ -65,6 +65,40 @@ slack draft rm <draft_id>
 
 Multiple workspaces: pass `--profile <name>` or set `SLACK_PROFILE`.
 
+## MCP server
+
+`slack mcp` serves the same commands as MCP tools over stdio, so an assistant
+can read threads and stage drafts without shelling out to the CLI.
+
+| tool | arguments |
+| --- | --- |
+| `thread_read` | `url`, `json`, `profile` |
+| `thread_file` | `url`, `out`, `profile` |
+| `draft_write` | `url`, `message`, `broadcast`, `profile` |
+| `draft_list` | `json`, `profile` |
+| `draft_rm` | `draft_id`, `profile` |
+| `auth_test` | `profile` |
+
+The same rule applies here: `draft_write` stages a draft and nothing sends it
+but you.
+
+Register it with any MCP host that speaks stdio, pointing at the `slack`
+executable with the `mcp` argument:
+
+```json
+{
+  "command": "/absolute/path/to/.bun/bin/slack",
+  "args": ["mcp"]
+}
+```
+
+Use an absolute path. MCP hosts are usually spawned from a shell that never
+sourced your profile, so `~/.bun/bin` is not on `PATH`.
+
+The server implements `initialize`, `tools/list`, `tools/call` and `ping` by
+hand, with no MCP SDK dependency, which keeps this package free of runtime
+dependencies.
+
 ## Caveats
 
 - `drafts.*` is Slack's internal API, not the public platform API. It can

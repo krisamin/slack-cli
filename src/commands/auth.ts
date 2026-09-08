@@ -10,14 +10,16 @@ interface AuthTestResponse {
   user_id: string;
 }
 
-export const authTest = async (profileName?: string): Promise<void> => {
+export const authTest = async (profileName?: string): Promise<string> => {
   const config = await loadConfig();
   const { name, profile } = resolveProfile(config, profileName);
   const res = await slackApi<AuthTestResponse>(profile, "auth.test");
-  console.log(`✓ authenticated (profile: ${name})`);
-  console.log(`  workspace : ${res.url}`);
-  console.log(`  team      : ${res.team} (${res.team_id})`);
-  console.log(`  user      : ${res.user} (${res.user_id})`);
+  return [
+    `✓ authenticated (profile: ${name})`,
+    `  workspace : ${res.url}`,
+    `  team      : ${res.team} (${res.team_id})`,
+    `  user      : ${res.user} (${res.user_id})`,
+  ].join("\n");
 };
 
 export const authSet = async (opts: {
@@ -25,7 +27,7 @@ export const authSet = async (opts: {
   token?: string;
   cookie?: string;
   setDefault: boolean;
-}): Promise<void> => {
+}): Promise<string> => {
   const token = opts.token ?? (await promptHidden("xoxc token: "));
   const cookie = opts.cookie ?? (await promptHidden("d cookie (xoxd-...): "));
 
@@ -37,10 +39,10 @@ export const authSet = async (opts: {
   if (opts.setDefault || !config.default) config.default = opts.profile;
   await saveConfig(config);
 
-  console.log(`Profile '${opts.profile}' saved (${configPath})`);
-  await authTest(opts.profile);
+  return `Profile '${opts.profile}' saved (${configPath})\n${await authTest(opts.profile)}`;
 };
 
+/** Interactive prompt: CLI only. The MCP server never reaches this path. */
 const promptHidden = async (label: string): Promise<string> => {
   process.stdout.write(label);
   for await (const line of console) {
