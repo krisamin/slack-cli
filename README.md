@@ -87,13 +87,15 @@ executable with the `mcp` argument:
 
 ```json
 {
-  "command": "/absolute/path/to/.bun/bin/slack",
-  "args": ["mcp"]
+  "command": "/absolute/path/to/.bun/bin/bun",
+  "args": ["run", "/absolute/path/to/.bun/bin/slack", "mcp"]
 }
 ```
 
-Use an absolute path. MCP hosts are usually spawned from a shell that never
-sourced your profile, so `~/.bun/bin` is not on `PATH`.
+Call Bun by absolute path and pass the script as an argument. MCP hosts are
+spawned from a shell that never sourced your profile, so `~/.bun/bin` is not on
+`PATH`, and `slack` starts with `#!/usr/bin/env bun`: pointing the host straight
+at it fails with `env: 'bun': No such file or directory`.
 
 The server implements `initialize`, `tools/list`, `tools/call` and `ping` by
 hand, with no MCP SDK dependency, which keeps this package free of runtime
