@@ -3,6 +3,7 @@ import pkg from "../package.json" with { type: "json" };
 import { authSet, authTest } from "./commands/auth";
 import { draftList, draftRemove, draftWrite } from "./commands/draft";
 import { file } from "./commands/file";
+import { history } from "./commands/history";
 import { read } from "./commands/read";
 import { runMcp } from "./mcp/server";
 
@@ -15,6 +16,12 @@ Usage:
       --cookie <xoxd-...>   d cookie (prompted if omitted, URL-encoded automatically)
       --default             make this the default profile
   slack read <url> [--json]                  print a thread with all replies
+  slack history <channel-url> --since <when> [--until <when>] [--thread] [--json]
+                                             channel messages in a time range; threads show
+                                             their reply count and a link for 'slack read'
+      --since / --until   YYYY-MM-DD, "YYYY-MM-DD HH:mm", 3d / 12h / 2w ago, or now
+                          (local time; --until defaults to now, a bare date covers that whole day)
+      --thread            also print every reply under each thread
   slack file <url> [--out <dir>] [--file-id-list <id,id>]
                                              download thread attachments (default: /tmp)
                                              ids come from the file lines in 'slack read'
@@ -33,7 +40,7 @@ Config: ~/.config/slack-cli/config.json
 `;
 
 /** Flags that consume the next argument as their value. Everything else is boolean. */
-const VALUE_FLAGS = new Set(["profile", "token", "cookie", "out", "file-id-list"]);
+const VALUE_FLAGS = new Set(["profile", "token", "cookie", "out", "file-id-list", "since", "until"]);
 
 interface ParsedArgs {
   positional: string[];
@@ -125,6 +132,21 @@ const main = async (): Promise<void> => {
       const url = rest[0];
       if (!url) throw new Error("Usage: slack read <url>");
       console.log(await read(url, { profile: str(flags.profile), json: flags.json === true }));
+      break;
+    }
+    case "history": {
+      const url = rest[0];
+      const since = str(flags.since);
+      if (!url || !since) throw new Error("Usage: slack history <channel-url> --since <when> [--until <when>]");
+      console.log(
+        await history(url, {
+          profile: str(flags.profile),
+          since,
+          until: str(flags.until),
+          thread: flags.thread === true,
+          json: flags.json === true,
+        }),
+      );
       break;
     }
     case "file": {

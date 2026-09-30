@@ -1,6 +1,7 @@
 import { authTest } from "../commands/auth";
 import { draftList, draftRemove, draftWrite } from "../commands/draft";
 import { file } from "../commands/file";
+import { history } from "../commands/history";
 import { read } from "../commands/read";
 
 export interface ToolDefinition {
@@ -71,6 +72,46 @@ export const TOOL_LIST: ToolDefinition[] = [
     run: (input) =>
       read(requiredString(input, "url"), {
         profile: optionalString(input, "profile"),
+        json: flag(input, "json"),
+      }),
+  },
+  {
+    name: "channel_history",
+    description:
+      "List every message a channel got between two times, oldest first. Each thread root shows its reply count and a thread link that thread_read accepts; set include_thread to get the replies inline instead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "Any link into the channel: a channel link, a message link, or an app.slack.com/client URL.",
+        },
+        since: {
+          type: "string",
+          description: 'Start, in local time: "2026-09-25", "2026-09-25 13:00", or relative like "3d" / "12h" / "2w".',
+        },
+        until: {
+          type: "string",
+          description: "End, same formats as since. Omit for now. A bare date includes that whole day.",
+        },
+        include_thread: {
+          type: "boolean",
+          description: "Fetch and print every reply under each thread. One extra API call per thread.",
+        },
+        json: {
+          type: "boolean",
+          description: "Return raw messages JSON (with permalink, thread_url and replies) instead of text.",
+        },
+        ...PROFILE_PROPERTY,
+      },
+      required: ["url", "since"],
+    },
+    run: (input) =>
+      history(requiredString(input, "url"), {
+        profile: optionalString(input, "profile"),
+        since: requiredString(input, "since"),
+        until: optionalString(input, "until"),
+        thread: flag(input, "include_thread"),
         json: flag(input, "json"),
       }),
   },

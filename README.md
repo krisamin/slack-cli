@@ -50,6 +50,13 @@ Notes:
 slack read 'https://myworkspace.slack.com/archives/C04XXXXXX/p1782090279095849'
 slack read <url> --json   # raw message JSON
 
+# every channel message in a range, oldest first. Thread roots get their reply
+# count and a link you can hand straight to `slack read`; --thread inlines them.
+# Times are local: YYYY-MM-DD, "YYYY-MM-DD HH:mm", 3d / 12h / 2w ago, or now.
+slack history <channel-or-message-url> --since 2026-09-25            # until now
+slack history <url> --since 2026-09-25 --until 2026-09-26            # two whole days
+slack history <url> --since 3d --thread
+
 # download every attachment in a thread
 slack file <url> --out ./downloads
 
@@ -77,6 +84,7 @@ can read threads and stage drafts without shelling out to the CLI.
 | tool | arguments |
 | --- | --- |
 | `thread_read` | `url`, `json`, `profile` |
+| `channel_history` | `url`, `since`, `until`, `include_thread`, `json`, `profile` |
 | `thread_file` | `url`, `file_id_list`, `out`, `profile` |
 | `draft_write` | `url`, `message`, `broadcast`, `profile` |
 | `draft_list` | `json`, `profile` |

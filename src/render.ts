@@ -23,6 +23,10 @@ export interface SlackMessage {
   files?: SlackFile[];
   attachments?: SlackAttachment[];
   reply_count?: number;
+  /** set on thread roots and replies; equals ts on the root */
+  thread_ts?: string;
+  latest_reply?: string;
+  subtype?: string;
 }
 
 const ANSI = {

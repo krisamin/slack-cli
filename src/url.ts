@@ -21,6 +21,10 @@ export const parseSlackUrl = (raw: string): SlackUrl => {
   const wsMatch = url.hostname.match(/^([^.]+)\.slack\.com$/);
   if (!wsMatch?.[1]) throw new Error(`Not a Slack URL: ${url.hostname}`);
 
+  // web client links (app.slack.com/client/T.../C...) carry the channel but no message
+  const clientMatch = url.pathname.match(/^\/client\/[A-Z0-9]+\/([A-Z0-9]+)/);
+  if (clientMatch?.[1]) return { workspace: wsMatch[1], channelId: clientMatch[1] };
+
   const pathMatch = url.pathname.match(/\/archives\/([A-Z0-9]+)(?:\/p(\d{10})(\d{6}))?/);
   if (!pathMatch?.[1]) throw new Error(`Can't parse a channel from: ${url.pathname}`);
 
