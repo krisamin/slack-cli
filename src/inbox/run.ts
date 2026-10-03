@@ -92,8 +92,62 @@ const merge = (into: Map<string, [string, string]>, from: Map<string, [string, s
   for (const [k, v] of from) into.set(k, v);
 };
 
+/**
+ * Close tier-1 items you already reacted to: your reply is the last word, you
+ * posted in the same channel after it, or you left a reaction on one of its
+ * messages. Then the wake mark follows only what is still waiting on you, so
+ * a poller wakes for nothing else.
+ */
+export const settleAnswered = (inbox: Inbox): number => {
+  const { db } = inbox;
+  const self = getState(db, "self_user") ?? "";
+  const itemList = db
+    .query<{ channel_id: string; root_ts: string; last_ts: string; mine_ts: string; ack_ts: string }, []>(
+      "SELECT channel_id, root_ts, last_ts, mine_ts, ack_ts FROM item WHERE seq > ack_seq AND tier = 1",
+    )
+    .all();
+  const close = db.query("UPDATE item SET ack_seq = seq, ack_ts = last_ts WHERE channel_id = ? AND root_ts = ?");
+  let closed = 0;
+  for (const item of itemList) {
+    let answered = item.mine_ts !== "" && item.mine_ts >= item.last_ts;
+    if (!answered) {
+      answered = Boolean(
+        db
+          .query("SELECT 1 FROM message WHERE channel_id = ? AND user = ? AND ts > ? AND deleted = 0 LIMIT 1")
+          .get(item.channel_id, self, item.last_ts),
+      );
+    }
+    if (!answered) {
+      const bodyList =
+        item.root_ts === "channel"
+          ? db
+              .query<{ body: string }, [string, string]>(
+                "SELECT body FROM message WHERE channel_id = ? AND thread_ts = ts AND ts > ?",
+              )
+              .all(item.channel_id, item.ack_ts || "0")
+          : db
+              .query<{ body: string }, [string, string]>(
+                "SELECT body FROM message WHERE channel_id = ? AND thread_ts = ?",
+              )
+              .all(item.channel_id, item.root_ts);
+      answered = bodyList.some(({ body }) =>
+        ((JSON.parse(body) as { reactions?: { users: string[] }[] }).reactions ?? []).some((r) =>
+          r.users.includes(self),
+        ),
+      );
+    }
+    if (answered) closed += close.run(item.channel_id, item.root_ts).changes;
+  }
+  const waiting = db
+    .query<{ seq: number | null }, []>("SELECT MAX(seq) AS seq FROM item WHERE seq > ack_seq AND tier = 1")
+    .get();
+  if (waiting?.seq) setState(db, "wake_seq", String(waiting.seq));
+  return closed;
+};
+
 const finish = (inbox: Inbox, col: Collector, startedAt: number): string => {
   regrade(col);
+  col.report.noteList.push(`auto-closed ${settleAnswered(inbox)} items you already answered`);
   setState(inbox.db, "auth", "ok");
   setState(inbox.db, "last_sync", String(startedAt));
   setState(inbox.db, "last_report", JSON.stringify(col.report));
