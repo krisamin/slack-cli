@@ -14,6 +14,9 @@ export class SlackApiError extends Error {
   }
 }
 
+/** Calls and 429s in this process, for the sync report. */
+export const apiStat = { call: 0, throttled: 0 };
+
 export const slackApi = async <T extends { ok: boolean }>(
   profile: Profile,
   method: string,
@@ -29,10 +32,12 @@ export const slackApi = async <T extends { ok: boolean }>(
       },
       body: body.toString(),
     });
+  apiStat.call++;
   let res = await send();
   // Tier-3 methods (history, replies) allow ~50/min; a long range with many
   // threads hits that, and Slack says how long to wait in Retry-After.
   for (let attempt = 0; res.status === 429 && attempt < 5; attempt++) {
+    apiStat.throttled++;
     const waitSecond = Number(res.headers.get("retry-after") ?? "1") || 1;
     await Bun.sleep(waitSecond * 1000);
     res = await send();

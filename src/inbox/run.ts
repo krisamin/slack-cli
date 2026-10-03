@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { closeSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
+import { apiStat } from "../api";
 import { loadConfig, type Profile, resolveProfile } from "../config";
 import { UserResolver } from "../users";
 import {
@@ -97,7 +98,17 @@ const finish = (inbox: Inbox, col: Collector, startedAt: number): string => {
   setState(inbox.db, "last_sync", String(startedAt));
   setState(inbox.db, "last_report", JSON.stringify(col.report));
   const r = col.report;
+  setState(
+    inbox.db,
+    "last_api",
+    JSON.stringify({
+      call: apiStat.call,
+      throttled: apiStat.throttled,
+      second: Math.round(Date.now() / 1000 - startedAt),
+    }),
+  );
   const lineList = [
+    `api calls ${apiStat.call}, 429 ${apiStat.throttled}, ${Math.round(Date.now() / 1000 - startedAt)}s`,
     `searched ${r.searched}, channels read ${r.historyChannel}, threads read ${r.threadFetched}`,
     `messages new ${r.newMessage}, edited ${r.changedMessage}, deleted ${r.deletedMessage}; items raised ${r.bumped}`,
   ];

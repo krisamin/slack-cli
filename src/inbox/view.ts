@@ -215,13 +215,18 @@ export const pending = async (opts: PendingOption): Promise<string> => {
 };
 
 /** Mark items read in the inbox (never in Slack). `upto` keeps items that arrived after you looked. */
-export const ack = async (opts: { profile?: string; upto?: number; keyList: string[] }): Promise<string> => {
+export const ack = async (opts: {
+  profile?: string;
+  upto?: number;
+  keyList: string[];
+  tier?: number;
+}): Promise<string> => {
   const inbox = await openInbox(opts.profile);
   let changed = 0;
   if (opts.upto !== undefined) {
     changed += inbox.db
-      .query("UPDATE item SET ack_seq = seq, ack_ts = last_ts WHERE seq > ack_seq AND seq <= ?")
-      .run(opts.upto).changes;
+      .query("UPDATE item SET ack_seq = seq, ack_ts = last_ts WHERE seq > ack_seq AND seq <= ? AND tier <= ?")
+      .run(opts.upto, opts.tier ?? 2).changes;
   }
   for (const key of opts.keyList) {
     const cut = key.indexOf(":");
@@ -272,6 +277,7 @@ export const stats = async (profile?: string): Promise<string> => {
     `messages    ${count("SELECT COUNT(*) AS n FROM message")} (${count("SELECT COUNT(*) AS n FROM message WHERE deleted = 1")} deleted) in ${count("SELECT COUNT(DISTINCT channel_id) AS n FROM message")} channels`,
     `items       ${count("SELECT COUNT(*) AS n FROM item")} total · pending tier1 ${count("SELECT COUNT(*) AS n FROM item WHERE seq > ack_seq AND tier = 1")} · tier2 ${count("SELECT COUNT(*) AS n FROM item WHERE seq > ack_seq AND tier = 2")}`,
     `last run    ${report ?? "-"}`,
+    `last api    ${getState(db, "last_api") ?? "-"}`,
   ].join("\n");
 };
 

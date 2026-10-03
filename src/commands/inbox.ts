@@ -11,8 +11,10 @@ export const INBOX_HELP = `slack inbox — keep a local inbox of what needs you 
                                          raise items only from --items-since (default: same)
   slack inbox pending [--tier 1] [--brief] [--json] [--no-refresh]
                                          unacknowledged items with their threads
-  slack inbox ack --upto <n> | <key...>  acknowledge items (local only, Slack stays unread)
-  slack inbox mark                       one line that changes when something new arrives
+  slack inbox ack --upto <n> [--tier 1] | <key...>
+                                         acknowledge items (local only, Slack stays unread)
+  slack inbox mark                       one line that changes when something of yours arrives
+                                         (tier 1 only; watched channels wait for the briefing)
   slack inbox tick                       sync, then mark (for a 10-minute poller)
   slack inbox stats                      cursor, counts, last run
   slack inbox channels                   channel grades and suggestions
@@ -54,7 +56,12 @@ export const inbox = async (arg: InboxArg): Promise<string> => {
     case "ack": {
       const upto = arg.upto !== undefined ? Number(arg.upto) : undefined;
       if (upto === undefined && !arg.restList.length) throw new Error("Usage: slack inbox ack --upto <n> | <key...>");
-      return ack({ profile: arg.profile, ...(upto !== undefined ? { upto } : {}), keyList: arg.restList });
+      return ack({
+        profile: arg.profile,
+        ...(upto !== undefined ? { upto } : {}),
+        ...(arg.tier ? { tier: Number(arg.tier) } : {}),
+        keyList: arg.restList,
+      });
     }
     case "mark":
       return mark(arg.profile);

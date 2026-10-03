@@ -357,7 +357,9 @@ const bump = (
     return;
   }
   const seq = nextSeq(db, "item_seq");
-  setState(db, "wake_seq", String(seq));
+  // the poller wakes only for what is yours; watched-channel chatter and bot
+  // alerts wait for the daily briefing
+  if (tier === 1) setState(db, "wake_seq", String(seq));
   const reactivated = raw.threadTs !== raw.ts && Number(raw.ts) - Number(raw.threadTs) > 86_400 ? 1 : 0;
   if (!old) {
     db.query(
