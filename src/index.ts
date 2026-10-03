@@ -4,6 +4,7 @@ import { authSet, authTest } from "./commands/auth";
 import { draftList, draftRemove, draftWrite } from "./commands/draft";
 import { file } from "./commands/file";
 import { history } from "./commands/history";
+import { INBOX_HELP, inbox } from "./commands/inbox";
 import { read } from "./commands/read";
 import { runMcp } from "./mcp/server";
 
@@ -29,6 +30,8 @@ Usage:
                                              stage a reply draft (stdin works too)
   slack draft list [--json]                  list pending drafts
   slack draft rm <draft_id>                  delete a draft
+  slack inbox <sync|backfill|pending|ack|mark|tick|stats|channels>
+                                             local inbox of what needs you ('slack inbox' for help)
   slack mcp                                  serve the same commands as MCP tools over stdio
 
 Options:
@@ -40,7 +43,7 @@ Config: ~/.config/slack-cli/config.json
 `;
 
 /** Flags that consume the next argument as their value. Everything else is boolean. */
-const VALUE_FLAGS = new Set(["profile", "token", "cookie", "out", "file-id-list", "since", "until"]);
+const VALUE_FLAGS = new Set(["profile", "token", "cookie", "out", "file-id-list", "since", "until", "upto", "tier"]);
 
 interface ParsedArgs {
   positional: string[];
@@ -186,6 +189,27 @@ const main = async (): Promise<void> => {
       } else {
         throw new Error(`Unknown draft subcommand: ${sub ?? "(none)"} — expected write, list, or rm.`);
       }
+      break;
+    }
+    case "inbox": {
+      const [sub, ...restList] = rest;
+      if (!sub) {
+        console.log(INBOX_HELP);
+        break;
+      }
+      console.log(
+        await inbox({
+          sub,
+          restList,
+          profile: str(flags.profile),
+          since: str(flags.since),
+          upto: str(flags.upto),
+          tier: str(flags.tier),
+          json: flags.json === true,
+          brief: flags.brief === true,
+          noRefresh: flags["no-refresh"] === true,
+        }),
+      );
       break;
     }
     case "mcp": {
