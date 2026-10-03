@@ -138,10 +138,26 @@ export const settleAnswered = (inbox: Inbox): number => {
     }
     if (answered) closed += close.run(item.channel_id, item.root_ts).changes;
   }
-  const waiting = db
-    .query<{ seq: number | null }, []>("SELECT MAX(seq) AS seq FROM item WHERE seq > ack_seq AND tier = 1")
-    .get();
-  if (waiting?.seq) setState(db, "wake_seq", String(waiting.seq));
+  // what still waits on you, minus reasons configured to wait for the briefing
+  const quietSet = new Set(inbox.setting.quietWakeList);
+  const waitList = db
+    .query<{ seq: number; channel_id: string; root_ts: string; reason: string; grade: string }, []>(
+      `SELECT i.seq, i.channel_id, i.root_ts, i.reason, COALESCE(c.grade, '') AS grade
+       FROM item i LEFT JOIN channel c ON c.id = i.channel_id WHERE i.seq > i.ack_seq AND i.tier = 1`,
+    )
+    .all()
+    .filter((w) => w.reason.split(",").some((r) => r && r !== "edited" && !quietSet.has(`${w.grade}:${r}`)));
+  const top = waitList.reduce((max, w) => Math.max(max, w.seq), 0);
+  const before = Number(getState(db, "wake_seq") ?? "0");
+  if (top > before) {
+    setState(db, "wake_seq", String(top));
+    const log = db.query(
+      "INSERT INTO wake_log (at, seq, channel_id, root_ts, grade, reason) VALUES (?, ?, ?, ?, ?, ?)",
+    );
+    for (const w of waitList.filter((x) => x.seq > before)) {
+      log.run(Date.now(), w.seq, w.channel_id, w.root_ts, w.grade, w.reason);
+    }
+  }
   return closed;
 };
 

@@ -16,6 +16,11 @@ export interface InboxSetting {
   botList: string[];
   /** Channels to ignore except for direct mentions. */
   muteList: string[];
+  /**
+   * "grade:reason" pairs that never wake the poller on their own, e.g.
+   * "watch:@here" or "normal:@backend". Those items wait for the briefing.
+   */
+  quietWakeList: string[];
   /** How far back each sync re-reads, to catch search-index lag. */
   overlapSecond: number;
   /** A channel with at least this many messages in 7 days and a human share below botShare is graded bot. */
@@ -31,6 +36,7 @@ const DEFAULT_SETTING: InboxSetting = {
   watchPrefixList: [],
   botList: [],
   muteList: [],
+  quietWakeList: [],
   overlapSecond: 900,
   botMinMessage: 30,
   botShare: 0.1,

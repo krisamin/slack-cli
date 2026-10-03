@@ -64,6 +64,14 @@ CREATE TABLE IF NOT EXISTS day_count (
   total INTEGER NOT NULL,
   PRIMARY KEY (channel_id, day)
 );
+CREATE TABLE IF NOT EXISTS wake_log (
+  at INTEGER NOT NULL,
+  seq INTEGER NOT NULL,
+  channel_id TEXT NOT NULL,
+  root_ts TEXT NOT NULL,
+  grade TEXT NOT NULL,
+  reason TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
