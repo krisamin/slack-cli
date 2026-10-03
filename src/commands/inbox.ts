@@ -1,6 +1,6 @@
 import { backfill, sync } from "../inbox/run";
 import { SETTING_PATH } from "../inbox/setting";
-import { ack, channelTable, mark, pending, stats, tickLine } from "../inbox/view";
+import { ack, channelTable, digest, mark, pending, stats, tickLine } from "../inbox/view";
 import { parseTime } from "../time";
 
 export const INBOX_HELP = `slack inbox — keep a local inbox of what needs you (SQLite, ~/.local/share/slack-cli)
@@ -13,6 +13,8 @@ export const INBOX_HELP = `slack inbox — keep a local inbox of what needs you 
                                          unacknowledged items with their threads
   slack inbox ack --upto <n> [--tier 1] | <key...>
                                          acknowledge items (local only, Slack stays unread)
+  slack inbox digest --since <when> [--json]
+                                         every thread people wrote in since then, acked or not (for summaries)
   slack inbox mark                       one line that changes when something of yours arrives
                                          (tier 1 only; watched channels wait for the briefing)
   slack inbox tick                       sync, then mark (for a 10-minute poller)
@@ -62,6 +64,10 @@ export const inbox = async (arg: InboxArg): Promise<string> => {
         ...(arg.tier ? { tier: Number(arg.tier) } : {}),
         keyList: arg.restList,
       });
+    }
+    case "digest": {
+      if (!arg.since) throw new Error("Usage: slack inbox digest --since <when> [--json]");
+      return digest({ profile: arg.profile, sinceMs: parseTime(arg.since, "start"), json: arg.json });
     }
     case "mark":
       return mark(arg.profile);

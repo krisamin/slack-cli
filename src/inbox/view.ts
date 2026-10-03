@@ -319,3 +319,125 @@ export const channelTable = async (profile?: string): Promise<string> => {
   await inbox.resolver.save();
   return out.join("\n");
 };
+
+/**
+ * Everything people said since a time, thread by thread, whether acknowledged
+ * or not. Acking means "nothing for you to do", not "leave it out of the
+ * summary": progress reports in threads you follow belong in a digest.
+ * Covers threads that are items (any tier, acked or not) and every human post
+ * in DM and watched channels.
+ */
+export const digest = async (opts: { profile?: string; sinceMs: number; json: boolean }): Promise<string> => {
+  const inbox = await openInbox(opts.profile);
+  const { db } = inbox;
+  const since = (opts.sinceMs / 1000).toFixed(6);
+  const self = getState(db, "self_user") ?? "";
+  const base = getState(db, "base_url") ?? "";
+  const groupList = db
+    .query<{ channel_id: string; thread_ts: string; is_root: number; first_ts: string; n: number }, [string]>(
+      `SELECT m.channel_id, m.thread_ts, MAX(m.thread_ts = m.ts AND m.reply_count = 0) AS is_root,
+              MIN(m.ts) AS first_ts, COUNT(*) AS n
+       FROM message m JOIN channel c ON c.id = m.channel_id
+       WHERE m.ts >= ? AND m.bot = 0 AND m.deleted = 0 AND m.user <> ''
+         AND (c.grade IN ('dm', 'watch')
+              OR EXISTS (SELECT 1 FROM item i WHERE i.channel_id = m.channel_id AND i.root_ts = m.thread_ts))
+       GROUP BY m.channel_id, m.thread_ts`,
+    )
+    .all(since);
+  // top-level chatter in a DM or watched channel reads as one block per channel
+  const blockMap = new Map<string, { channelId: string; rootTs: string; firstTs: string }>();
+  for (const g of groupList) {
+    const channel = getChannel(db, g.channel_id);
+    const flat =
+      g.is_root === 1 &&
+      (channel?.grade === "dm" || channel?.grade === "watch") &&
+      !db.query("SELECT 1 FROM item WHERE channel_id = ? AND root_ts = ?").get(g.channel_id, g.thread_ts);
+    const rootTs = flat ? CHANNEL_ROOT : g.thread_ts;
+    const key = `${g.channel_id}:${rootTs}`;
+    const old = blockMap.get(key);
+    if (!old || g.first_ts < old.firstTs) blockMap.set(key, { channelId: g.channel_id, rootTs, firstTs: g.first_ts });
+  }
+  const blockList = [...blockMap.values()].sort((a, b) => Number(a.firstTs) - Number(b.firstTs));
+  const allMessage: SlackMessage[] = [];
+  const rendered: {
+    label: string;
+    link: string;
+    flagList: string[];
+    root?: MessageRow;
+    earlier: number;
+    fresh: MessageRow[];
+  }[] = [];
+  for (const b of blockList) {
+    const channel = getChannel(db, b.channelId);
+    const label = await channelLabel(inbox, channel, b.channelId);
+    const item = db
+      .query<ItemRow, [string, string]>("SELECT * FROM item WHERE channel_id = ? AND root_ts = ?")
+      .get(b.channelId, b.rootTs);
+    const rowList =
+      b.rootTs === CHANNEL_ROOT
+        ? db
+            .query<MessageRow, [string, string]>(
+              "SELECT * FROM message WHERE channel_id = ? AND thread_ts = ts AND reply_count = 0 AND ts >= ? ORDER BY ts",
+            )
+            .all(b.channelId, since)
+        : db
+            .query<MessageRow, [string, string]>(
+              "SELECT * FROM message WHERE channel_id = ? AND thread_ts = ? ORDER BY ts",
+            )
+            .all(b.channelId, b.rootTs);
+    const root = b.rootTs !== CHANNEL_ROOT ? rowList[0] : undefined;
+    const fresh = rowList.filter((m) => m.ts >= since && m !== root);
+    const reacted = new Set<string>();
+    for (const m of rowList) {
+      const body = JSON.parse(m.body) as { reactions?: { name: string; users: string[] }[] };
+      for (const r of body.reactions ?? []) if (r.users.includes(self)) reacted.add(r.name);
+    }
+    const youPosted = rowList.some((m) => m.user === self && m.ts >= since);
+    const flagList = [
+      item ? `tier ${item.tier} · ${item.reason}` : `${channel?.grade ?? "?"} channel`,
+      item?.reactivated ? "old thread revived" : "",
+      youPosted ? "you posted" : "",
+      reacted.size ? `you reacted :${[...reacted].join(": :")}:` : "",
+      item ? (item.ack_seq >= item.seq ? "acked" : "pending") : "not an item",
+    ].filter(Boolean);
+    const link =
+      b.rootTs === CHANNEL_ROOT
+        ? permalink(base, b.channelId, fresh[0]?.ts ?? b.firstTs)
+        : permalink(base, b.channelId, b.rootTs);
+    const earlier = rowList.length - fresh.length - (root ? 1 : 0);
+    rendered.push({ label, link, flagList, ...(root ? { root } : {}), earlier, fresh });
+    for (const m of [root, ...fresh]) if (m) allMessage.push(JSON.parse(m.body) as SlackMessage);
+  }
+  if (opts.json) {
+    await inbox.resolver.save();
+    return JSON.stringify(
+      rendered.map((r) => ({
+        channel: r.label,
+        link: r.link,
+        flagList: r.flagList,
+        root: r.root ? JSON.parse(r.root.body) : null,
+        earlier: r.earlier,
+        newList: r.fresh.map((m) => JSON.parse(m.body)),
+      })),
+      null,
+      2,
+    );
+  }
+  const users = await inbox.resolver.resolveMany(extractMentions(allMessage));
+  await inbox.resolver.save();
+  const out = [header(`digest since ${formatTs(since)} · ${rendered.length} threads`), ""];
+  let index = 0;
+  for (const r of rendered) {
+    index++;
+    out.push(header(`[${index}] ${r.label} · ${r.flagList.join(" · ")}`));
+    out.push(r.link);
+    if (r.root) out.push(renderMessage(JSON.parse(r.root.body) as SlackMessage, users), "");
+    if (r.earlier > 0) out.push(`  … ${r.earlier} earlier replies`, "");
+    for (const m of r.fresh) {
+      const [first, ...rest] = renderMessage(JSON.parse(m.body) as SlackMessage, users).split("\n");
+      out.push([`${first} · NEW`, ...rest].join("\n"), "");
+    }
+  }
+  if (!rendered.length) out.push("(nothing)");
+  return out.join("\n").trimEnd();
+};
