@@ -19,6 +19,7 @@ import {
 } from "./store";
 
 export interface InboxMessage extends SlackMessage {
+  reactions?: { name: string; users?: string[]; count?: number }[];
   edited?: { ts?: string };
   subscribed?: boolean;
   last_read?: string;
@@ -169,6 +170,9 @@ const slimBody = (msg: SlackMessage): SlackMessage => ({
   ...(msg.thread_ts ? { thread_ts: msg.thread_ts } : {}),
   text: msg.text ?? "",
   ...(msg.files?.length ? { files: msg.files.map((f) => ({ id: f.id, name: f.name, mimetype: f.mimetype })) } : {}),
+  ...((msg as InboxMessage).reactions?.length
+    ? { reactions: (msg as InboxMessage).reactions?.map((r) => ({ name: r.name, users: r.users ?? [] })) }
+    : {}),
   ...(msg.attachments?.length
     ? {
         attachments: msg.attachments.map((att) => ({

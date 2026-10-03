@@ -49,6 +49,24 @@ const itemMessageList = (inbox: Inbox, item: ItemRow): MessageRow[] => {
     .all(item.channel_id, item.root_ts);
 };
 
+/**
+ * Did you answer outside the thread? People often reply in the channel body
+ * instead of the thread, or answer "please check" with a reaction. Both count.
+ */
+const answeredElsewhere = (inbox: Inbox, item: ItemRow, self: string): { postTs: string; reactionList: string[] } => {
+  const post = inbox.db
+    .query<{ ts: string }, [string, string, string]>(
+      "SELECT ts FROM message WHERE channel_id = ? AND user = ? AND ts > ? AND deleted = 0 ORDER BY ts LIMIT 1",
+    )
+    .get(item.channel_id, self, item.last_ts);
+  const reactionSet = new Set<string>();
+  for (const m of itemMessageList(inbox, item)) {
+    const body = JSON.parse(m.body) as { reactions?: { name: string; users: string[] }[] };
+    for (const r of body.reactions ?? []) if (r.users.includes(self)) reactionSet.add(r.name);
+  }
+  return { postTs: post?.ts ?? "", reactionList: [...reactionSet] };
+};
+
 export interface PendingOption {
   profile?: string;
   json: boolean;
@@ -115,7 +133,14 @@ export const pending = async (opts: PendingOption): Promise<string> => {
           link,
           lastTs: item.last_ts,
           youRepliedTs: item.mine_ts || null,
-          answered: item.mine_ts !== "" && item.mine_ts >= item.last_ts,
+          ...((elsewhere) => ({
+            answered:
+              (item.mine_ts !== "" && item.mine_ts >= item.last_ts) ||
+              elsewhere.postTs !== "" ||
+              elsewhere.reactionList.length > 0,
+            youPostedInChannelTs: elsewhere.postTs || null,
+            youReacted: elsewhere.reactionList,
+          }))(answeredElsewhere(inbox, item, self)),
           reactivated: item.reactivated === 1,
           messageList: messageList.map((m) => ({
             ...(JSON.parse(m.body) as SlackMessage),
@@ -143,6 +168,7 @@ export const pending = async (opts: PendingOption): Promise<string> => {
   let index = 0;
   for (const { item, label, link, messageList } of blockList) {
     index++;
+    const elsewhere = answeredElsewhere(inbox, item, self);
     const flagList = [
       item.reason,
       item.reactivated ? "old thread revived" : "",
@@ -150,6 +176,10 @@ export const pending = async (opts: PendingOption): Promise<string> => {
       item.mine_ts
         ? `you replied ${formatTs(item.mine_ts)}${item.mine_ts >= item.last_ts ? " (last word yours)" : ""}`
         : "",
+      elsewhere.postTs
+        ? `you posted in channel ${formatTs(elsewhere.postTs)}${Number(elsewhere.postTs) - Number(item.last_ts) <= 1800 ? " (within 30m, likely answered)" : ""}`
+        : "",
+      elsewhere.reactionList.length ? `you reacted :${elsewhere.reactionList.join(": :")}:` : "",
     ].filter(Boolean);
     out.push(header(`[${index}] tier ${item.tier} · ${label} · ${flagList.join(" · ")}`));
     out.push(`key ${item.channel_id}:${item.root_ts} · ${link}`);
