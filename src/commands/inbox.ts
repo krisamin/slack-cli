@@ -6,7 +6,9 @@ import { parseTime } from "../time";
 export const INBOX_HELP = `slack inbox — keep a local inbox of what needs you (SQLite, ~/.local/share/slack-cli)
 
   slack inbox sync                       collect since the last run (search + DMs + followed threads)
-  slack inbox backfill --since <when>    first run: read everything from a date on
+  slack inbox backfill --since <when> [--items-since <when>]
+                                         first run: archive every conversation you are in from a date on;
+                                         raise items only from --items-since (default: same)
   slack inbox pending [--tier 1] [--brief] [--json] [--no-refresh]
                                          unacknowledged items with their threads
   slack inbox ack --upto <n> | <key...>  acknowledge items (local only, Slack stays unread)
@@ -24,6 +26,7 @@ export interface InboxArg {
   restList: string[];
   profile?: string;
   since?: string;
+  itemSince?: string;
   upto?: string;
   tier?: string;
   json: boolean;
@@ -36,8 +39,9 @@ export const inbox = async (arg: InboxArg): Promise<string> => {
     case "sync":
       return sync(arg.profile);
     case "backfill": {
-      if (!arg.since) throw new Error("Usage: slack inbox backfill --since <when>");
-      return backfill(parseTime(arg.since, "start"), arg.profile);
+      if (!arg.since) throw new Error("Usage: slack inbox backfill --since <when> [--items-since <when>]");
+      const archiveMs = parseTime(arg.since, "start");
+      return backfill(archiveMs, arg.itemSince ? parseTime(arg.itemSince, "start") : archiveMs, arg.profile);
     }
     case "pending":
       return pending({

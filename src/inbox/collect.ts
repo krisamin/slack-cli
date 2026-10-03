@@ -114,6 +114,8 @@ export interface Collector {
   self: Self;
   /** messages older than this never raise an item; they are context */
   floorTs: number;
+  /** everything since this is stored, item or not */
+  archiveFloorTs: number;
   report: SyncReport;
   /** threads already re-read in this run */
   fetchedThread: Set<string>;
@@ -451,22 +453,37 @@ export const ingest = async (
 
 // ---------------------------------------------------------------- threads
 
-export const fetchReplies = async (col: Collector, channelId: string, rootTs: string): Promise<InboxMessage[]> => {
+/** Replies of one thread. `complete` is false when the page cap cut it short. */
+export const fetchReplies = async (
+  col: Collector,
+  channelId: string,
+  rootTs: string,
+  maxPage = 20,
+): Promise<{ messages: InboxMessage[]; complete: boolean }> => {
   const messages: InboxMessage[] = [];
   let cursor: string | undefined;
-  for (let page = 0; page < 20; page++) {
+  let complete = false;
+  for (let page = 0; page < maxPage; page++) {
     const params: Record<string, string> = { channel: channelId, ts: rootTs, limit: "200" };
     if (cursor) params.cursor = cursor;
     const res = await slackApi<PageResponse>(col.profile, "conversations.replies", params);
     messages.push(...res.messages);
     cursor = res.response_metadata?.next_cursor;
-    if (!res.has_more || !cursor) break;
+    if (!res.has_more || !cursor) {
+      complete = true;
+      break;
+    }
   }
-  return messages;
+  return { messages, complete };
 };
 
 /** Re-read whole threads: new replies, edits, and deletions (gone from the reply list). */
-export const refreshThreadList = async (col: Collector, threadList: [string, string][], budget = 60): Promise<void> => {
+export const refreshThreadList = async (
+  col: Collector,
+  threadList: [string, string][],
+  budget = 60,
+  maxPage = 20,
+): Promise<void> => {
   let queue = threadList;
   const startSize = col.fetchedThread.size;
   for (let round = 0; round < 3 && queue.length; round++) {
@@ -480,8 +497,9 @@ export const refreshThreadList = async (col: Collector, threadList: [string, str
       }
       col.fetchedThread.add(key);
       let messages: InboxMessage[];
+      let complete: boolean;
       try {
-        messages = await fetchReplies(col, channelId, rootTs);
+        ({ messages, complete } = await fetchReplies(col, channelId, rootTs, maxPage));
       } catch (err) {
         if (isAuthError(err)) throw err;
         const code = err instanceof SlackApiError ? err.code : String(err);
@@ -494,15 +512,20 @@ export const refreshThreadList = async (col: Collector, threadList: [string, str
       }
       col.report.threadFetched++;
       const root = messages[0];
-      const seenTsSet = new Set(messages.map((m) => m.ts));
-      const goneList = col.db
-        .query<{ ts: string }, [string, string]>(
-          "SELECT ts FROM message WHERE channel_id = ? AND thread_ts = ? AND deleted = 0",
-        )
-        .all(channelId, rootTs)
-        .map((r) => r.ts)
-        .filter((ts) => !seenTsSet.has(ts));
-      col.report.deletedMessage += markDeleted(col.db, channelId, goneList);
+      // a thread cut short by the page cap says nothing about what is missing
+      if (complete) {
+        const seenTsSet = new Set(messages.map((m) => m.ts));
+        const goneList = col.db
+          .query<{ ts: string }, [string, string]>(
+            "SELECT ts FROM message WHERE channel_id = ? AND thread_ts = ? AND deleted = 0",
+          )
+          .all(channelId, rootTs)
+          .map((r) => r.ts)
+          .filter((ts) => !seenTsSet.has(ts));
+        col.report.deletedMessage += markDeleted(col.db, channelId, goneList);
+      } else {
+        col.report.noteList.push(`thread ${channelId}/${rootTs} over ${messages.length} replies, read partly`);
+      }
       col.db
         .query(
           `INSERT INTO thread (channel_id, root_ts, followed, last_read, latest_reply, fetched_at) VALUES (?, ?, ?, ?, ?, ?)
@@ -631,10 +654,15 @@ export const fillRange = async (
 
 // ---------------------------------------------------------------- history
 
-const fetchHistory = async (col: Collector, channelId: string, oldest: string): Promise<InboxMessage[]> => {
+const fetchHistory = async (
+  col: Collector,
+  channelId: string,
+  oldest: string,
+  maxPage: number,
+): Promise<InboxMessage[]> => {
   const messages: InboxMessage[] = [];
   let cursor: string | undefined;
-  for (let page = 0; page < 50; page++) {
+  for (let page = 0; page < maxPage; page++) {
     const params: Record<string, string> = { channel: channelId, oldest, inclusive: "true", limit: "200" };
     if (cursor) params.cursor = cursor;
     const res = await slackApi<PageResponse>(col.profile, "conversations.history", params);
@@ -653,11 +681,12 @@ export const readChannel = async (
   col: Collector,
   channelId: string,
   oldestTs: number,
+  archive = false,
 ): Promise<Map<string, [string, string]>> => {
   const oldest = oldestTs.toFixed(6);
   let messages: InboxMessage[];
   try {
-    messages = await fetchHistory(col, channelId, oldest);
+    messages = await fetchHistory(col, channelId, oldest, archive ? 500 : 50);
   } catch (err) {
     if (isAuthError(err)) throw err;
     col.report.noteList.push(`history ${channelId}: ${err instanceof SlackApiError ? err.code : String(err)}`);
@@ -687,9 +716,11 @@ export const readChannel = async (
       )
       .get(channelId, m.ts);
     const channel = getChannel(col.db, channelId);
+    // Every thread is archived; only bot threads (often thousands of replies a day)
+    // are left to search for their new replies after the first full read.
     const caresAbout =
-      channel?.grade === "dm" ||
-      channel?.grade === "watch" ||
+      archive ||
+      (channel?.grade !== "bot" && channel?.grade !== "mute") ||
       m.subscribed === true ||
       Boolean(col.db.query("SELECT 1 FROM item WHERE channel_id = ? AND root_ts = ?").get(channelId, m.ts));
     if (caresAbout && (!thread || thread.latest_reply !== (m.latest_reply ?? ""))) {
@@ -711,9 +742,10 @@ export const changedChannelList = async (col: Collector): Promise<{ id: string; 
     if (!channel) continue;
     const moved = entry.latest > channel.latest;
     update.run(entry.latest, entry.last_read, entry.id);
-    if (!moved || channel.grade === "bot" || channel.grade === "mute") continue;
-    const fromTs = channel.history_ts ? Number(channel.history_ts) - col.setting.overlapSecond : col.floorTs / 1000;
-    out.push({ id: entry.id, since: Math.max(fromTs, col.floorTs / 1000) });
+    if (!moved) continue;
+    const floor = col.archiveFloorTs / 1000;
+    const fromTs = channel.history_ts ? Number(channel.history_ts) - col.setting.overlapSecond : floor;
+    out.push({ id: entry.id, since: Math.max(fromTs, floor) });
   }
   return out;
 };

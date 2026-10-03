@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { closeSync, openSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type Profile, resolveProfile } from "../config";
 import { UserResolver } from "../users";
@@ -46,6 +46,9 @@ export const makeCollector = (inbox: Inbox): Collector => ({
   setting: inbox.setting,
   self: loadSelf(inbox.db, inbox.setting),
   floorTs: Number(getState(inbox.db, "floor_ts") ?? String(Date.now() - 86_400_000)),
+  archiveFloorTs: Number(
+    getState(inbox.db, "archive_floor_ts") ?? getState(inbox.db, "floor_ts") ?? String(Date.now() - 86_400_000),
+  ),
   report: emptyReport(),
   fetchedThread: new Set(),
 });
@@ -59,8 +62,19 @@ const withLock = async <T>(fn: () => Promise<T>): Promise<T> => {
   try {
     fd = openSync(path, "wx");
   } catch {
+    // a backfill can run for an hour, so a lock is stale only when its process is gone
     const age = Date.now() - statSync(path).mtimeMs;
-    if (age < LOCK_STALE_MS) throw new Error(`another inbox run holds ${path} (${Math.round(age / 1000)}s old)`);
+    const pid = Number(readFileSync(path, "utf8").trim());
+    let alive = false;
+    try {
+      if (pid > 0) process.kill(pid, 0);
+      alive = pid > 0;
+    } catch {
+      alive = false;
+    }
+    if (alive || (!pid && age < LOCK_STALE_MS)) {
+      throw new Error(`another inbox run holds ${path} (${Math.round(age / 1000)}s old)`);
+    }
     unlinkSync(path);
     fd = openSync(path, "wx");
   }
@@ -82,14 +96,6 @@ const finish = (inbox: Inbox, col: Collector, startedAt: number): string => {
   setState(inbox.db, "auth", "ok");
   setState(inbox.db, "last_sync", String(startedAt));
   setState(inbox.db, "last_report", JSON.stringify(col.report));
-  // bot chatter is only counted; drop its text after two weeks
-  const cutoff = ((Date.now() - 14 * 86_400_000) / 1000).toFixed(6);
-  inbox.db
-    .query(
-      `DELETE FROM message WHERE ts < ? AND channel_id IN (SELECT id FROM channel WHERE grade IN ('bot', 'mute'))
-       AND NOT EXISTS (SELECT 1 FROM item WHERE item.channel_id = message.channel_id AND item.root_ts = message.thread_ts)`,
-    )
-    .run(cutoff);
   const r = col.report;
   const lineList = [
     `searched ${r.searched}, channels read ${r.historyChannel}, threads read ${r.threadFetched}`,
@@ -148,26 +154,33 @@ export const sync = async (profileOption?: string): Promise<string> => {
   });
 };
 
+const progress = (inbox: Inbox, text: string): void => {
+  setState(inbox.db, "backfill_progress", `${new Date().toISOString()} ${text}`);
+  console.error(`[${new Date().toLocaleTimeString()}] ${text}`);
+};
+
 /**
- * First run: read everything since `sinceMs`. Search per day (busy channels
- * excluded and counted), then targeted searches for you across the whole
- * range, then the normal incremental pass reads every non-bot channel you are
- * in through history and every thread that matters through replies.
+ * First run: archive every conversation you are in from `archiveSinceMs` on
+ * (history of each, then every thread in full), plus searches for you in
+ * channels you are not in. Items are raised only for messages since
+ * `itemSinceMs`; older ones are stored as context.
  */
-export const backfill = async (sinceMs: number, profileOption?: string): Promise<string> => {
+export const backfill = async (
+  archiveSinceMs: number,
+  itemSinceMs: number,
+  profileOption?: string,
+): Promise<string> => {
   const inbox = await openInbox(profileOption);
   return withLock(async () => {
     const startedAt = Date.now() / 1000;
-    setState(inbox.db, "floor_ts", String(sinceMs));
+    setState(inbox.db, "floor_ts", String(itemSinceMs));
+    setState(inbox.db, "archive_floor_ts", String(archiveSinceMs));
     const col = makeCollector(inbox);
     try {
       await refreshMeta(col, true);
       col.self = loadSelf(inbox.db, inbox.setting);
       const wanted = new Map<string, [string, string]>();
-      const filled = await fillRange(col, sinceMs / 1000, startedAt);
-      merge(wanted, filled.wanted);
-      regrade(col);
-      const after = `after:${localDay(sinceMs - 86_400_000)}`;
+      const after = `after:${localDay(archiveSinceMs - 86_400_000)}`;
       const me = col.self.userId;
       const targeted = [
         `${after} <@${me}>`,
@@ -177,13 +190,31 @@ export const backfill = async (sinceMs: number, profileOption?: string): Promise
         ...inbox.setting.nameList.map((name) => `${after} ${name}`),
       ];
       for (const query of targeted) {
-        merge(wanted, (await searchDown(col, query, sinceMs / 1000)).wanted);
+        merge(wanted, (await searchDown(col, query, archiveSinceMs / 1000)).wanted);
       }
+      progress(inbox, `targeted search done, ${wanted.size} threads`);
+      const channelList = inbox.db
+        .query<{ id: string; name: string }, []>("SELECT id, name FROM channel WHERE is_member = 1 ORDER BY kind, name")
+        .all();
+      let index = 0;
+      for (const { id, name } of channelList) {
+        index++;
+        const found = await readChannel(col, id, archiveSinceMs / 1000, true);
+        await refreshThreadList(col, [...found.values()], 1_000_000, 100);
+        inbox.db.query("UPDATE channel SET history_ts = ? WHERE id = ?").run(String(startedAt), id);
+        if (index % 10 === 0 || index === channelList.length) {
+          progress(
+            inbox,
+            `channels ${index}/${channelList.length} (last ${name}), threads ${col.report.threadFetched}`,
+          );
+        }
+      }
+      await refreshThreadList(col, [...wanted.values()], 1_000_000, 100);
+      regrade(col);
       setState(inbox.db, "search_ts", String(startedAt));
-      // reset channel marks so the incremental pass reads every channel from the floor
-      inbox.db.query("UPDATE channel SET latest = '', history_ts = ''").run();
-      await refreshThreadList(col, [...wanted.values()], 3000);
+      progress(inbox, "archive done, catching up");
       await incremental(inbox, col, startedAt);
+      progress(inbox, "done");
     } catch (err) {
       if (isAuthError(err)) authFail(inbox, err);
       throw err;

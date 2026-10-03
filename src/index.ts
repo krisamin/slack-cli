@@ -43,7 +43,18 @@ Config: ~/.config/slack-cli/config.json
 `;
 
 /** Flags that consume the next argument as their value. Everything else is boolean. */
-const VALUE_FLAGS = new Set(["profile", "token", "cookie", "out", "file-id-list", "since", "until", "upto", "tier"]);
+const VALUE_FLAGS = new Set([
+  "profile",
+  "token",
+  "cookie",
+  "out",
+  "file-id-list",
+  "since",
+  "until",
+  "upto",
+  "tier",
+  "items-since",
+]);
 
 interface ParsedArgs {
   positional: string[];
@@ -203,6 +214,7 @@ const main = async (): Promise<void> => {
           restList,
           profile: str(flags.profile),
           since: str(flags.since),
+          itemSince: str(flags["items-since"]),
           upto: str(flags.upto),
           tier: str(flags.tier),
           json: flags.json === true,
