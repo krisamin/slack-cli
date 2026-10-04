@@ -11,6 +11,9 @@ const permalink = (base: string, channelId: string, ts: string, threadTs?: strin
   return threadTs && threadTs !== ts ? `${link}?thread_ts=${threadTs}&cid=${channelId}` : link;
 };
 
+/** Link to one message itself: replies carry thread_ts so Slack opens them in place. */
+const messageLink = (base: string, m: MessageRow): string => permalink(base, m.channel_id, m.ts, m.thread_ts);
+
 const channelLabel = async (inbox: Inbox, channel: ChannelRow | undefined, id: string): Promise<string> => {
   if (!channel) return id;
   if (channel.kind === "im") {
@@ -144,6 +147,7 @@ export const pending = async (opts: PendingOption): Promise<string> => {
           reactivated: item.reactivated === 1,
           messageList: messageList.map((m) => ({
             ...(JSON.parse(m.body) as SlackMessage),
+            permalink: messageLink(base, m),
             isNew: m.ts > item.ack_ts,
             deleted: m.deleted === 1,
           })),
@@ -185,7 +189,7 @@ export const pending = async (opts: PendingOption): Promise<string> => {
     out.push(`key ${item.channel_id}:${item.root_ts} · ${link}`);
     if (opts.brief) {
       const last = [...messageList].reverse().find((m) => m.user !== self) ?? messageList.at(-1);
-      if (last) out.push(renderMessage(JSON.parse(last.body) as SlackMessage, users));
+      if (last) out.push(renderMessage(JSON.parse(last.body) as SlackMessage, users), `  ↳ ${messageLink(base, last)}`);
       out.push("");
       continue;
     }
@@ -198,9 +202,9 @@ export const pending = async (opts: PendingOption): Promise<string> => {
     const renderRow = (m: MessageRow, isNew: boolean): string => {
       const text = renderMessage(JSON.parse(m.body) as SlackMessage, users);
       const tagList = [isNew ? "NEW" : "", m.deleted ? "DELETED" : "", m.edited_ts ? "edited" : ""].filter(Boolean);
-      if (!tagList.length) return text;
       const [first, ...rest] = text.split("\n");
-      return [`${first} · ${tagList.join(" · ")}`, ...rest].join("\n");
+      const head = tagList.length ? `${first} · ${tagList.join(" · ")}` : first;
+      return [head, `  ↳ ${messageLink(base, m)}`, ...rest].join("\n");
     };
     if (root) out.push(renderRow(root, root.ts > item.ack_ts), "");
     if (skipped > 0) out.push(`  … ${skipped} earlier replies`, "");
@@ -415,9 +419,9 @@ export const digest = async (opts: { profile?: string; sinceMs: number; json: bo
         channel: r.label,
         link: r.link,
         flagList: r.flagList,
-        root: r.root ? JSON.parse(r.root.body) : null,
+        root: r.root ? { ...JSON.parse(r.root.body), permalink: messageLink(base, r.root) } : null,
         earlier: r.earlier,
-        newList: r.fresh.map((m) => JSON.parse(m.body)),
+        newList: r.fresh.map((m) => ({ ...JSON.parse(m.body), permalink: messageLink(base, m) })),
       })),
       null,
       2,
@@ -431,11 +435,14 @@ export const digest = async (opts: { profile?: string; sinceMs: number; json: bo
     index++;
     out.push(header(`[${index}] ${r.label} · ${r.flagList.join(" · ")}`));
     out.push(r.link);
-    if (r.root) out.push(renderMessage(JSON.parse(r.root.body) as SlackMessage, users), "");
+    if (r.root) {
+      const [first, ...rest] = renderMessage(JSON.parse(r.root.body) as SlackMessage, users).split("\n");
+      out.push([first, `  ↳ ${messageLink(base, r.root)}`, ...rest].join("\n"), "");
+    }
     if (r.earlier > 0) out.push(`  … ${r.earlier} earlier replies`, "");
     for (const m of r.fresh) {
       const [first, ...rest] = renderMessage(JSON.parse(m.body) as SlackMessage, users).split("\n");
-      out.push([`${first} · NEW`, ...rest].join("\n"), "");
+      out.push([`${first} · NEW`, `  ↳ ${messageLink(base, m)}`, ...rest].join("\n"), "");
     }
   }
   if (!rendered.length) out.push("(nothing)");
