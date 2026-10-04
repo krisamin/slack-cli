@@ -98,6 +98,28 @@ const merge = (into: Map<string, [string, string]>, from: Map<string, [string, s
  * messages. Then the wake mark follows only what is still waiting on you, so
  * a poller wakes for nothing else.
  */
+const DM_COOL_MS = 30 * 60_000;
+const URGENT_RE = /긴급|장애|롤백|지금\s*확인|전화/;
+
+/**
+ * A DM or group DM that keeps chatting while you stay quiet wakes the poller
+ * at most once per 30 minutes; the rest piles up and is read together.
+ * A direct mention or an urgent word breaks the wait.
+ */
+const dmCooling = (db: Database, channelId: string, grade: string, self: string): boolean => {
+  if (grade !== "dm") return false;
+  const last = db
+    .query<{ at: number | null }, [string]>("SELECT MAX(at) AS at FROM wake_log WHERE channel_id = ?")
+    .get(channelId);
+  if (!last?.at || Date.now() - last.at >= DM_COOL_MS) return false;
+  const textList = db
+    .query<{ text: string }, [string, string, string]>(
+      "SELECT text FROM message WHERE channel_id = ? AND user <> ? AND deleted = 0 AND CAST(ts AS REAL) * 1000 > ?",
+    )
+    .all(channelId, self, String(last.at));
+  return !textList.some(({ text }) => text.includes(`<@${self}>`) || URGENT_RE.test(text));
+};
+
 export const settleAnswered = (inbox: Inbox): number => {
   const { db } = inbox;
   const self = getState(db, "self_user") ?? "";
@@ -146,7 +168,8 @@ export const settleAnswered = (inbox: Inbox): number => {
        FROM item i LEFT JOIN channel c ON c.id = i.channel_id WHERE i.seq > i.ack_seq AND i.tier = 1`,
     )
     .all()
-    .filter((w) => w.reason.split(",").some((r) => r && r !== "edited" && !quietSet.has(`${w.grade}:${r}`)));
+    .filter((w) => w.reason.split(",").some((r) => r && r !== "edited" && !quietSet.has(`${w.grade}:${r}`)))
+    .filter((w) => !dmCooling(db, w.channel_id, w.grade, self));
   const top = waitList.reduce((max, w) => Math.max(max, w.seq), 0);
   const before = Number(getState(db, "wake_seq") ?? "0");
   if (top > before) {
