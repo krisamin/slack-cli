@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 import pkg from "../package.json" with { type: "json" };
 import { authSet, authTest } from "./commands/auth";
-import { draftList, draftRemove, draftWrite } from "./commands/draft";
+import { draftList, draftRemove, draftSend, draftWrite } from "./commands/draft";
 import { file } from "./commands/file";
 import { history } from "./commands/history";
 import { INBOX_HELP, inbox } from "./commands/inbox";
 import { read } from "./commands/read";
+import { send } from "./commands/send";
 import { runMcp } from "./mcp/server";
 
 const HELP = `slack — Slack CLI that runs on your browser session (xoxc token + xoxd cookie)
@@ -30,6 +31,11 @@ Usage:
                                              stage a reply draft (stdin works too)
   slack draft list [--json]                  list pending drafts
   slack draft rm <draft_id>                  delete a draft
+  slack draft send <draft_id>                send a staged draft where it was staged, then remove it
+  slack send <url> [-m <text> | -f <file>] [--broadcast]
+                                             post right away as you (stdin works too). A message
+                                             link replies in its thread; a channel link posts to
+                                             the channel. --broadcast also shows a reply in channel
   slack inbox <sync|backfill|pending|ack|mark|tick|stats|channels>
                                              local inbox of what needs you ('slack inbox' for help)
   slack mcp                                  serve the same commands as MCP tools over stdio
@@ -197,9 +203,25 @@ const main = async (): Promise<void> => {
         const draftId = rest[1];
         if (!draftId) throw new Error("Usage: slack draft rm <draft_id>");
         console.log(await draftRemove(draftId, { profile: str(flags.profile) }));
+      } else if (sub === "send") {
+        const draftId = rest[1];
+        if (!draftId) throw new Error("Usage: slack draft send <draft_id>");
+        console.log(await draftSend(draftId, { profile: str(flags.profile) }));
       } else {
-        throw new Error(`Unknown draft subcommand: ${sub ?? "(none)"} — expected write, list, or rm.`);
+        throw new Error(`Unknown draft subcommand: ${sub ?? "(none)"} — expected write, list, rm, or send.`);
       }
+      break;
+    }
+    case "send": {
+      const url = rest[0];
+      if (!url) throw new Error("Usage: slack send <url> [-m <text> | -f <file>] [--broadcast]");
+      console.log(
+        await send(url, {
+          profile: str(flags.profile),
+          text: await resolveBody(str(flags.message), str(flags.file)),
+          broadcast: flags.broadcast === true,
+        }),
+      );
       break;
     }
     case "inbox": {

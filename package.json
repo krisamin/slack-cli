@@ -1,7 +1,7 @@
 {
   "name": "@krisamin/slack-cli",
   "version": "0.3.0",
-  "description": "Slack CLI on top of your browser session — read threads, download files, stage reply drafts",
+  "description": "Slack CLI on top of your browser session — read threads, download files, stage or send replies",
   "license": "MIT",
   "author": "krisamin",
   "repository": {

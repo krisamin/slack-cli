@@ -6,9 +6,13 @@ can open Slack in a browser, you can use this.
 
 Two things it does well: dumping a full thread as readable text, and staging
 reply drafts through Slack's internal `drafts.*` API. Drafts land in the
-compose box only — you review and hit send in Slack yourself. The CLI never
-sends anything on your behalf, which is the whole point: I use it to prepare
-replies programmatically without giving anything the power to speak as me.
+compose box only — you review and hit send in Slack yourself. That stays the
+default: I use it to prepare replies programmatically without giving anything
+the power to speak as me.
+
+When you do want it to speak for you, `slack send` posts right away and
+`slack draft send` ships a draft you already staged. Both are explicit
+commands; nothing else in the CLI sends.
 
 ## Install
 
@@ -72,7 +76,19 @@ echo "body" | slack draft write <url>
 # manage drafts
 slack draft list
 slack draft rm <draft_id>
+slack draft send <draft_id>   # send it where it was staged, then remove the draft
+
+# post right away, as you. A message link replies in its thread, a channel
+# link posts to the channel; --broadcast also shows a thread reply in channel.
+slack send <url> -m "Deployed, closing this."
+slack send <url> -f reply.txt --broadcast
+echo "body" | slack send <url>
 ```
+
+Text goes out verbatim, like drafts: `*stars*` stay stars. Slack reference
+tokens are the exception and become real elements — `<@U0123>` a mention,
+`<#C0123>` a channel, `<!here>` / `<!channel>` / `<!everyone>` a broadcast,
+`<https://example.com|label>` a link.
 
 Multiple workspaces: pass `--profile <name>` or set `SLACK_PROFILE`.
 
@@ -89,10 +105,13 @@ can read threads and stage drafts without shelling out to the CLI.
 | `draft_write` | `url`, `message`, `broadcast`, `profile` |
 | `draft_list` | `json`, `profile` |
 | `draft_rm` | `draft_id`, `profile` |
+| `draft_send` | `draft_id`, `profile` |
+| `message_send` | `url`, `message`, `broadcast`, `profile` |
 | `auth_test` | `profile` |
 
-The same rule applies here: `draft_write` stages a draft and nothing sends it
-but you.
+`draft_write` still only stages a draft. `message_send` and `draft_send` post
+as you immediately, and their descriptions tell the assistant to call them only
+when you asked for the message to go out.
 
 Register it with any MCP host that speaks stdio, pointing at the `slack`
 executable with the `mcp` argument:

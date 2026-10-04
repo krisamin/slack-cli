@@ -1,8 +1,9 @@
 import { authTest } from "../commands/auth";
-import { draftList, draftRemove, draftWrite } from "../commands/draft";
+import { draftList, draftRemove, draftSend, draftWrite } from "../commands/draft";
 import { file } from "../commands/file";
 import { history } from "../commands/history";
 import { read } from "../commands/read";
+import { send } from "../commands/send";
 
 export interface ToolDefinition {
   name: string;
@@ -203,6 +204,55 @@ export const TOOL_LIST: ToolDefinition[] = [
     run: (input) =>
       draftRemove(requiredString(input, "draft_id"), {
         profile: optionalString(input, "profile"),
+      }),
+  },
+  {
+    name: "draft_send",
+    description:
+      "Send a pending draft, as the user, to the thread or channel it was staged for, then delete the draft. Sends immediately; only use it when the user has asked for this draft to go out.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        draft_id: { type: "string", description: "Draft id from draft_list or draft_write." },
+        ...PROFILE_PROPERTY,
+      },
+      required: ["draft_id"],
+    },
+    run: (input) =>
+      draftSend(requiredString(input, "draft_id"), {
+        profile: optionalString(input, "profile"),
+      }),
+  },
+  {
+    name: "message_send",
+    description:
+      "Post a message as the user right away. There is no review step and it cannot be unsent from here, so only call it when the user has asked for the message to be sent; to let them review first, use draft_write. A message URL replies in that thread; a channel URL posts to the channel. Returns the new message's link.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description:
+            "Where to post. A message or thread link replies in its thread; a channel link (or app.slack.com/client URL) posts a new channel message.",
+        },
+        message: {
+          type: "string",
+          description:
+            "Body as plain text, sent verbatim (no mrkdwn). Separate paragraphs with a blank line and let Slack wrap them.",
+        },
+        broadcast: {
+          type: "boolean",
+          description: "For a thread reply, also show it in the channel. Rejected for a channel URL.",
+        },
+        ...PROFILE_PROPERTY,
+      },
+      required: ["url", "message"],
+    },
+    run: (input) =>
+      send(requiredString(input, "url"), {
+        profile: optionalString(input, "profile"),
+        text: requiredString(input, "message"),
+        broadcast: flag(input, "broadcast"),
       }),
   },
   {
