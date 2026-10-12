@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import pkg from "../package.json" with { type: "json" };
+import { analyze } from "./commands/analyze";
 import { authSet, authTest } from "./commands/auth";
 import { draftList, draftRemove, draftWrite } from "./commands/draft";
 import { file } from "./commands/file";
@@ -32,6 +33,8 @@ Usage:
   slack draft rm <draft_id>                  delete a draft
   slack inbox <sync|backfill|pending|ack|mark|tick|stats|channels>
                                              local inbox of what needs you ('slack inbox' for help)
+  slack analyze <thread-url|thread|ask|search|metadata>
+                                             read-only local cache / local model analysis (JSON)
   slack mcp                                  serve the same commands as MCP tools over stdio
 
 Options:
@@ -54,6 +57,10 @@ const VALUE_FLAGS = new Set([
   "upto",
   "tier",
   "items-since",
+  "channel",
+  "user",
+  "limit",
+  "mode",
 ]);
 
 interface ParsedArgs {
@@ -222,6 +229,10 @@ const main = async (): Promise<void> => {
           noRefresh: flags["no-refresh"] === true,
         }),
       );
+      break;
+    }
+    case "analyze": {
+      console.log(await analyze(rest, flags));
       break;
     }
     case "mcp": {
