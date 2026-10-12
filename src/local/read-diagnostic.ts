@@ -51,8 +51,14 @@ const safeInput = (method: string, value: unknown): unknown => {
   const source = value as Record<string, unknown>;
   const input: Record<string, unknown> = {};
   for (const name of allowed) {
-    if (!Object.hasOwn(source, name)) continue;
-    const item = source[name];
+    const descriptor = Object.getOwnPropertyDescriptor(source, name);
+    if (!descriptor) continue;
+    // Diagnostic evidence must not execute user accessors or alter the read failure.
+    if (!Object.hasOwn(descriptor, "value")) {
+      input[name] = { accessor_omitted: true };
+      continue;
+    }
+    const item: unknown = descriptor.value;
     if (typeof item === "string")
       input[name] =
         item.length <= 1024

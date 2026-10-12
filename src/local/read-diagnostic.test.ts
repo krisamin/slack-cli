@@ -80,7 +80,7 @@ const probe = async (action: string, option: { diagnostics?: string; input?: unk
     const started = performance.now();
     let result;
     try { result = {status:"ok",data:await readLocal(process.env.TEST_METHOD,JSON.parse(process.env.TEST_INPUT))}; }
-    catch (error) { result={status:"error",error:String(error)}; }
+    catch (error) { result={status:"error",error:String(error),error_class:error instanceof Error?error.name:"UnknownThrownValue"}; }
     console.log(JSON.stringify({...result,elapsed_ms:performance.now()-started,child_pid:childPID}));
   `;
   const child = Bun.spawn([process.execPath, "--no-env-file", "-e", source], {
@@ -116,7 +116,7 @@ test("default off and success perform no diagnostic configuration/file access", 
   const ok = await probe("success", { diagnostics: absent });
   expect(ok.status).toBe("ok");
   const failed = await probe("worker-error");
-  expect(failed.error).toBe("Error: Local cache read timed out or failed.");
+  expect(failed.error).toBe(`Error: synthetic private stderr ${secret}`);
   expect(files()).toHaveLength(0);
   expect(existsSync(absent)).toBe(false);
 });
@@ -127,9 +127,10 @@ test("failure receipt carries exact permitted input and bounded stderr metadata 
     diagnostics: config,
     input: { query: privateQuery, channel_id: "CTEST1", limit: 20, api_key: secret },
   });
-  expect(r.error).toBe("Error: Local cache read timed out or failed.");
+  expect(r.error).toBe(`Error: synthetic private stderr ${secret}`);
   expect(JSON.stringify(r)).not.toContain(home);
-  expect(JSON.stringify(r)).not.toContain(secret);
+  // Existing public stderr detail is preserved, not invented by diagnostics.
+  expect(r.error).toContain(secret);
   expect(JSON.stringify(r)).not.toContain(privateQuery);
   const receipt = join(receiptDirectory, files()[0] ?? "missing");
   expect(statSync(receipt).mode & 0o777).toBe(0o600);
@@ -296,10 +297,15 @@ test("actual worker success with a private synthetic cache leaves diagnostic out
   expect(readFileSync(dbPath)).toEqual(before);
 });
 
-test("invalid JSON and output overflow store only metadata and return scrubbed errors", async () => {
+test("invalid JSON and output overflow preserve original exceptions and store only diagnostic metadata", async () => {
   setConfig();
   const invalid = await probe("invalid-json", { diagnostics: config });
-  expect(invalid.error).toBe("Error: Local cache read returned invalid JSON.");
+  expect(invalid.error_class).toBe("SyntaxError");
+  try {
+    JSON.parse("synthetic message body synthetic-do-not-reflect-key\n");
+  } catch (error) {
+    expect(invalid.error).toBe(String(error));
+  }
   const limit = await probe("output-limit", { diagnostics: config });
   expect(limit.error).toBe("Error: Local read output exceeds the byte limit.");
   expect(files()).toHaveLength(2);
@@ -312,7 +318,7 @@ test("invalid JSON and output overflow store only metadata and return scrubbed e
 
 test("a permanently unsafe diagnostic reference never changes the public worker error", async () => {
   const r = await probe("worker-error", { diagnostics: join(home, "missing-config") });
-  expect(r.error).toBe("Error: Local cache read timed out or failed.");
+  expect(r.error).toBe(`Error: synthetic private stderr ${secret}`);
   expect(files()).toHaveLength(0);
 });
 
@@ -381,7 +387,7 @@ test("a different effective owner cannot activate the private recorder", async (
   expect(files()).toHaveLength(0);
 });
 
-test("published stdio error never reflects private diagnostic input path or worker stderr", async () => {
+test("published stdio preserves original worker stderr but adds no diagnostic input or path", async () => {
   setConfig();
   const serverSource = fileURLToPath(new URL("../mcp/server.ts", import.meta.url));
   const toolSource = fileURLToPath(new URL("../mcp/tool.ts", import.meta.url));
@@ -424,7 +430,102 @@ test("published stdio error never reflects private diagnostic input path or work
   expect(code).toBe(0);
   expect(error).toBe("");
   expect(JSON.parse(output).result.isError).toBe(true);
-  expect(output).toContain("Local cache read timed out or failed.");
-  for (const value of [privateQuery, secret, home, "synthetic private stderr"]) expect(output).not.toContain(value);
+  expect(output).toContain(`synthetic private stderr ${secret}`);
+  for (const value of [privateQuery, home]) expect(output).not.toContain(value);
   expect(files()).toHaveLength(1);
+});
+
+test("diagnostic input capture never invokes allowed or unknown getters", () => {
+  setConfig();
+  process.env[READ_DIAGNOSTIC_ENV] = config;
+  let getterCalls = 0;
+  const input = Object.defineProperties(
+    {},
+    {
+      query: {
+        enumerable: true,
+        get: () => {
+          getterCalls++;
+          throw new Error("getter must not run");
+        },
+      },
+      api_key: {
+        enumerable: true,
+        get: () => {
+          getterCalls++;
+          return secret;
+        },
+      },
+      limit: { enumerable: true, value: 20 },
+    },
+  );
+  recordReadFailure({ ...failure(), input });
+  expect(getterCalls).toBe(0);
+  const data = JSON.parse(readFileSync(join(receiptDirectory, files()[0] ?? "missing"), "utf8"));
+  expect(data.input).toEqual({ value: { query: { accessor_omitted: true }, limit: 20 }, unknown_key_count: 1 });
+  expect(JSON.stringify(data)).not.toContain(secret);
+});
+
+test("spawn exception object and public message are untouched by default-off and opt-in diagnostics", async () => {
+  setConfig();
+  for (const optIn of [false, true]) {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--no-env-file",
+        "-e",
+        `
+      globalThis.fetch=async()=>{throw new Error("Network forbidden.");};
+      const originalError=new TypeError("synthetic spawn error detail");
+      Bun.spawn=()=>{throw originalError;};
+      const {readLocal}=await import(process.env.TEST_READ_SOURCE);
+      let result;
+      try { await readLocal("search",{query:"synthetic private search"}); result={unexpected_success:true}; }
+      catch(error) {result={same_error_object:error===originalError,error:String(error),error_class:error.name};}
+      console.log(JSON.stringify(result));
+    `,
+      ],
+      {
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: home,
+          TEST_READ_SOURCE: readPath,
+          ...(optIn ? { [READ_DIAGNOSTIC_ENV]: config } : {}),
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [output, error, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(code).toBe(0);
+    expect(error).toBe("");
+    expect(JSON.parse(output)).toEqual({
+      same_error_object: true,
+      error: "TypeError: synthetic spawn error detail",
+      error_class: "TypeError",
+    });
+  }
+  expect(files()).toHaveLength(1);
+  const data = JSON.parse(readFileSync(join(receiptDirectory, files()[0] ?? "missing"), "utf8"));
+  expect(data.failure_kind).toBe("worker_transport");
+  expect(data.exception_class).toBe("TypeError");
+  expect(data.worker_pid).toBeNull();
+});
+
+test("nonzero stderr and JSON SyntaxError are identical with default-off and opt-in receipts", async () => {
+  setConfig({ directory: receiptDirectory, max_receipts: 4 });
+  for (const action of ["worker-error", "invalid-json"]) {
+    const off = await probe(action);
+    const on = await probe(action, { diagnostics: config });
+    expect(on.error).toBe(off.error);
+    expect(on.error_class).toBe(off.error_class);
+    expect(JSON.stringify(on)).not.toContain(home);
+    expect(JSON.stringify(off)).not.toContain(home);
+  }
+  expect(files()).toHaveLength(2);
 });

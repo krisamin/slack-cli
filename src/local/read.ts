@@ -71,22 +71,21 @@ export const readLocal = async <M extends ReadMethod>(
     const outputRead = read(activeChild.stdout);
     const errorRead = read(activeChild.stderr, true);
     streamJobs.push(outputRead, errorRead);
-    const [output, , code] = await Promise.all([outputRead, errorRead, activeChild.exited]);
+    const [output, error, code] = await Promise.all([outputRead, errorRead, activeChild.exited]);
     exitCode = code;
     if (code !== 0) {
       failureKind = timeoutFired ? "timeout" : "worker_exit";
-      throw new Error("Local cache read timed out or failed.");
+      throw new Error(error.trim() || "Local cache read timed out or failed.");
     }
     try {
       return JSON.parse(output) as ReturnType<LocalStore[M]>;
-    } catch {
+    } catch (error) {
       failureKind = "invalid_json";
-      throw new Error("Local cache read returned invalid JSON.");
+      throw error;
     }
   } catch (error) {
     failure = error;
     failureCaptured = true;
-    if (failureKind === "worker_transport") throw new Error("Local cache read timed out or failed.");
     throw error;
   } finally {
     clearTimeout(timer);
@@ -95,21 +94,35 @@ export const readLocal = async <M extends ReadMethod>(
       exitCode = await child.exited;
       await Promise.allSettled(streamJobs);
     }
-    if (failureCaptured)
-      recordReadFailure({
-        method,
-        input,
-        elapsed_ms: performance.now() - startedAt,
-        worker_pid: child?.pid ?? null,
-        exit_code: exitCode,
-        signal: child?.signalCode ?? null,
-        timeout_fired: timeoutFired,
-        failure_kind: failureKind,
-        exception_class: failure instanceof Error ? failure.name : "UnknownThrownValue",
-        stderr_bytes: stderrState.bytes,
-        stderr_sha256: stderrState.hash.digest("hex"),
-        stderr_complete: stderrState.complete,
-      });
+    if (failureCaptured) {
+      try {
+        recordReadFailure({
+          method,
+          input,
+          elapsed_ms: performance.now() - startedAt,
+          worker_pid: child?.pid ?? null,
+          exit_code: exitCode,
+          signal: child?.signalCode ?? null,
+          timeout_fired: timeoutFired,
+          failure_kind: failureKind,
+          exception_class:
+            failure instanceof SyntaxError
+              ? "SyntaxError"
+              : failure instanceof TypeError
+                ? "TypeError"
+                : failure instanceof RangeError
+                  ? "RangeError"
+                  : failure instanceof Error
+                    ? "Error"
+                    : "UnknownThrownValue",
+          stderr_bytes: stderrState.bytes,
+          stderr_sha256: stderrState.hash.digest("hex"),
+          stderr_complete: stderrState.complete,
+        });
+      } catch {
+        // Optional evidence must never replace the original read/spawn exception.
+      }
+    }
   }
 };
 
