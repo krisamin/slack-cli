@@ -228,6 +228,36 @@ Validation: `bun test`, `bun run typecheck`, `bun run lint`. Tests use only
 synthetic messages and a temporary cache; no Slack writes or external model
 calls are needed.
 
+### Optional model authentication
+
+The model configuration can reference a private key file with `api_key_file`.
+It does not store the key itself:
+
+```json
+{
+  "baseURL": "http://127.0.0.1:18080/v1",
+  "model": "local-multimodal",
+  "timeout_ms": 120000,
+  "max_tokens": 1800,
+  "api_key_file": "/absolute/private/directory/app-key"
+}
+```
+
+The key file must be a regular file owned by the current user with permissions
+exactly `0600`. Its content is one nonempty printable ASCII token, at most 4096
+bytes, optionally followed by one newline. Relative paths, final symlinks,
+missing files, unsafe permissions, empty content and multiline values are
+rejected before an HTTP request. The key is re-read for each request, sent only
+as a Bearer header, and is never included in parsed configuration or errors.
+Literal loopback `/v1` addresses and redirect rejection remain mandatory.
+
+Omitting `api_key_file` preserves the existing direct no-auth model path.
+A configured but invalid file never falls back to no-auth. Raw cache metadata,
+search and thread tools do not read model configuration or keys. The direct
+`/health` and `/slots` batch checks use the same optional header; these status
+reads do not provide global atomic admission across applications. A gateway's
+separate admission contract must be validated before routing batch work to it.
+
 ## MCP server
 
 `slack mcp` serves the same commands as MCP tools over stdio, so an assistant
