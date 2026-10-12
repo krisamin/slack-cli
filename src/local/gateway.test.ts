@@ -106,7 +106,7 @@ test("gateway exact overload is an atomic POST batch skip, not a GET capacity pr
     expect(result.status).toBe("busy");
     expect(result).toMatchObject({ mode: "batch" });
     expect(JSON.stringify(result)).not.toContain("synthetic reflected data");
-    expect(seen).toEqual(["POST /v1/chat/completions"]);
+    expect(seen).toEqual(["POST /v1/chat/completions/input_tokens"]);
     expect(existsSync(join(directory, "lock/inference.lock"))).toBe(false);
   } finally {
     server.stop(true);
@@ -191,6 +191,8 @@ test("gateway success preserves schema, thinkingfalse and output payload with PO
       });
       expect(body.stream).toBeUndefined();
       expect(request.headers.has("x-inference-deadline")).toBe(false);
+      if (new URL(request.url).pathname.endsWith("/input_tokens"))
+        return Response.json({ input_tokens: 1000, object: "response.input_tokens" });
       return Response.json(completion());
     },
   });
@@ -200,7 +202,7 @@ test("gateway success preserves schema, thinkingfalse and output payload with PO
       { store, config: config(`http://127.0.0.1:${server.port}/v1`), lockDirectory: join(directory, "lock") },
     );
     expect(result).toMatchObject({ status: "ok", human_review_required: true, analysis: answer });
-    expect(seen).toEqual(["POST /v1/chat/completions"]);
+    expect(seen).toEqual(["POST /v1/chat/completions/input_tokens", "POST /v1/chat/completions"]);
   } finally {
     server.stop(true);
   }
@@ -230,7 +232,7 @@ test("direct batch preserves health/slots preflight and does not reinterpret ove
         },
       ),
     ).rejects.toThrow("Local model HTTP 503");
-    expect(seen).toEqual(["/health", "/slots", "/v1/chat/completions"]);
+    expect(seen).toEqual(["/health", "/slots", "/v1/chat/completions/input_tokens"]);
   } finally {
     server.stop(true);
   }
@@ -247,6 +249,7 @@ test("body deadline aborts the same transport signal after headers and releases 
         store,
         config: cfg,
         lockDirectory: join(directory, "lock"),
+        countTransport: async () => Response.json({ input_tokens: 1000, object: "response.input_tokens" }),
         transport: async (_path, init) => {
           init.signal?.addEventListener(
             "abort",
@@ -308,6 +311,7 @@ test("delayed headers and a never-ending body share one request deadline and abo
         store,
         config: { baseURL: "http://127.0.0.1:18080/v1", model: "synthetic", timeout_ms: 100, max_tokens: 1800 },
         lockDirectory: join(directory, "lock"),
+        countTransport: async () => Response.json({ input_tokens: 1000, object: "response.input_tokens" }),
         transport: async (_path, init) => {
           requestStartedAt = performance.now();
           init.signal?.addEventListener(
@@ -368,6 +372,7 @@ test("malformed successful response never reflects a private prompt in a tool er
         store,
         config: { baseURL: "http://127.0.0.1:18080/v1", model: "synthetic", timeout_ms: 100, max_tokens: 1800 },
         lockDirectory: join(directory, "lock"),
+        countTransport: async () => Response.json({ input_tokens: 1000, object: "response.input_tokens" }),
         transport: async () => new Response("synthetic private prompt and key must not be reflected"),
       },
     ),
@@ -381,6 +386,8 @@ test("gateway ask executes unchanged search/thread tools then the final schema w
     port: 0,
     hostname: "127.0.0.1",
     fetch: async (request) => {
+      if (new URL(request.url).pathname.endsWith("/input_tokens"))
+        return Response.json({ input_tokens: 1000, object: "response.input_tokens" });
       methodList.push(request.method);
       const body = (await request.json()) as Record<string, unknown>;
       bodyList.push(body);
