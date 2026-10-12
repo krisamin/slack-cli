@@ -94,7 +94,8 @@ these commands.
 ```bash
 slack analyze metadata
 slack analyze search 'review' --channel CEXAMPLE --user UEXAMPLE --limit 10
-slack analyze search 'review' --since 2026-10-01 --until 2026-10-02
+slack analyze search 'review change' --since 2026-10-01 --until 2026-10-02
+slack analyze search 'deployment' --include-bot
 slack analyze thread CEXAMPLE 1790000000.000001
 slack analyze 'https://myworkspace.slack.com/archives/CEXAMPLE/p1790000000000001'
 slack analyze ask 'Who currently owns the review?'
@@ -106,8 +107,13 @@ slack analyze ask 'Compare the outstanding reviews' --think
 All results are JSON. `search`, `thread` (MCP `local_thread`) and `metadata`
 return cached data; CLI `analyze thread` runs the model. Date-only search filters
 are UTC, `since` is inclusive, `until` exclusive; timestamps must include a
-zone. Search uses literal substring matching, ASCII case-insensitive via SQLite
-`lower`, not user-supplied SQL or Slack search operators. It scans at most the
+zone. Search splits the query into at most 5 whitespace-separated literal substring
+terms, combined with AND (ASCII case-insensitive via SQLite `lower`). It is not
+user-supplied SQL or Slack search syntax. Bot rows are excluded before the scan
+cap unless `--include-bot` / `include_bot:true` explicitly opts in; thread reads
+always retain bot messages. Hits include `root_ts` as an alias of `thread_ts`
+for the next thread call. A no-hit result suggests dropping the least distinctive
+term, rather than only widening dates. It scans at most the
 latest 20,000 rows matching metadata filters and returns at most 50 hits,
 with 600-character previews. `scan_truncated`/`hit_limit_reached` explicitly
 report incomplete searches. Narrow the channel/date/author filters to inspect
@@ -134,13 +140,23 @@ remote/private-network URLs, URL credentials and extra configuration keys are
 rejected. Use a private SSH tunnel for a model running on another machine.
 There is no external API opt-in. The config must be an owned regular 0600 file,
 not a symlink. The model needs OpenAI tools and `response_format: json_schema`
-plus `chat_template_kwargs.enable_thinking` support. Unsupported/incomplete
+plus `chat_template_kwargs.enable_thinking` support. Investigation requests use
+tools only; the final request uses JSON schema only, never both together.
+A direct thread analysis goes straight to the schema-only final phase. Unsupported/incomplete
 responses fail rather than silently falling back to unstructured output.
 
 `ask` runs a real search → thread retrieval tool loop. Its only tools are
 `search`, `thread` and `metadata` (strict runtime validation, no SQL interface).
 The system prompt treats all cached/tool text as untrusted data, not
-instructions. A successful response includes:
+instructions. `reply_needed` and `task_open` refer only to the cached `self_user`'s
+obligations. An unanswered direct question still needs a reply; a distinct
+promised followup can remain open after a reply. `current_assignee_user_id`
+identifies the salient current request's owner, even if another user, or is
+null for closed/information-only cases. The deployment defaults are temperature
+0, seed 42 and 1,800 output tokens; private comparative evaluations using 768
+tokens are a different configuration and should not be conflated.
+
+A successful response includes:
 
 ```json
 {
@@ -161,8 +177,14 @@ Evidence must reference actually read, nondeleted thread messages and match an
 exact substring. Assignee IDs and deadlines must be grounded in that evidence;
 deadlines are quoted, not normalized. Unknown reply/task states are `null` and
 require human review. These checks establish grounding, **not semantic accuracy**.
-The model may still misread reassignment or closure. Reactions, nearby channel
-replies, images and linked documents are not expanded. Do not treat a cached
+The model may still misread reassignment or closure, or follow instructions
+injected into message bodies despite the untrusted-data prompt. Every model
+result is untrusted and includes `human_review_required:true`; it is **not an
+autonomous acknowledgement or alert/monitoring replacement**. The code restricts
+execution to three readonly tools, but that does not prove label robustness. Cached `body.reactions` are reduced to bounded names/user IDs/counts with
+`reaction_state: cached`; missing/malformed/unbounded reaction data are
+`unknown`, not proof of no reaction. Nearby channel replies, images and linked
+documents are not expanded. Do not treat a cached
 absence as proof that nobody replied or completed a task.
 
 Each thread preserves the entire root plus a bounded recent tail (at most 200
@@ -172,11 +194,14 @@ IDs/counts (ID list capped at 1,000), cache incompleteness and thread fetch time
 Any truncation/incompleteness forces `needs_human`. Each read reports `fetched_at`,
 `last_sync`/`asof` (cache sync epoch string), schema/data version and a database
 fingerprint. Changes during analysis also force review. No freshness claim is
-made about Slack beyond what the separate collector last cached.
+made about Slack beyond what the separate collector last cached. Edits newer
+than `last_sync` set `edit_after_asof` and require review. Historical text cannot
+be reconstructed from the latest stored row; `historical_reconstruction_supported`
+is always false.
 
 Resource limits: fixed SQLite reads run in a killable subprocess with a 3-second
 wall deadline; model calls have configurable timeouts up to 120 seconds and
-4,096 output tokens. Each analysis is at most 6 model iterations/12 tool calls,
+4,096 output tokens. Each analysis is at most 6 model requests including its final schema step/12 tool calls,
 50,000 characters per tool result, 100,000 cumulative context characters and
 1 MB per response. `finish_reason: length`, malformed JSON, unknown tool
 arguments, invalid evidence or exceeded limits fail closed. Foreground analysis
@@ -217,7 +242,7 @@ can read threads and stage drafts without shelling out to the CLI.
 | `draft_list` | `json`, `profile` |
 | `draft_rm` | `draft_id`, `profile` |
 | `auth_test` | `profile` |
-| `local_search` | `query`, `channel_id`, `user_id`, `since`, `until`, `limit` |
+| `local_search` | `query`, `channel_id`, `user_id`, `since`, `until`, `limit`, `include_bot` |
 | `local_thread` | `channel_id`, `root_ts` |
 | `local_metadata` | none |
 | `local_analyze` | `channel_id`, `root_ts`, `mode`, `think` |
@@ -241,6 +266,8 @@ spawned from a shell that never sourced your profile, so `~/.bun/bin` is not on
 `PATH`, and `slack` starts with `#!/usr/bin/env bun`: pointing the host straight
 at it fails with `env: 'bun': No such file or directory`.
 
+The server advertises readonly annotations for local tools, distinguishes explicit
+null request IDs from notifications, and drains pending calls after stdin EOF.
 The server implements `initialize`, `tools/list`, `tools/call` and `ping` by
 hand, with no MCP SDK dependency, which keeps this package free of runtime
 dependencies.

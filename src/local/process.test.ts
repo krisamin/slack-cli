@@ -139,3 +139,47 @@ test("MCP EOF after a readonly worker request preserves its response", async () 
   expect(frame.id).toBe(3);
   expect(JSON.parse(frame.result.content[0].text).root.text).toBe(message);
 });
+
+test("MCP explicit null-id is a request, readonly annotations are advertised", async () => {
+  const result = await command(["mcp"], `${JSON.stringify({ jsonrpc: "2.0", id: null, method: "tools/list" })}\n`);
+  const frame = JSON.parse(result.output);
+  expect(frame.id).toBeNull();
+  const toolList = frame.result.tools as { name: string; annotations?: { readOnlyHint?: boolean } }[];
+  expect(toolList.find((tool) => tool.name === "local_thread")?.annotations?.readOnlyHint).toBe(true);
+});
+
+test("MCP immediate EOF preserves delayed model response and null args fail", async () => {
+  const requestList = [
+    {
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: { name: "local_analyze", arguments: { channel_id: "CTEST1", root_ts: root } },
+    },
+    { jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "local_metadata", arguments: null } },
+  ];
+  const result = await command(["mcp"], `${requestList.map((input) => JSON.stringify(input)).join("\n")}\n`);
+  const frameList = result.output
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(frameList).toHaveLength(2);
+  expect(frameList.find((frame) => frame.id === 8).result.isError).toBe(true);
+  expect(JSON.parse(frameList.find((frame) => frame.id === 7).result.content[0].text).analysis.summary).toBe(
+    status.summary,
+  );
+});
+
+test("MCP protocol parser errors and old initialize version are preserved", async () => {
+  const result = await command(
+    ["mcp"],
+    `broken\nnull\n${JSON.stringify({ jsonrpc: "2.0", id: 11, method: "initialize", params: { protocolVersion: "2024-11-05" } })}\n`,
+  );
+  const frameList = result.output
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(frameList[0].error.code).toBe(-32700);
+  expect(frameList[1].error.code).toBe(-32600);
+  expect(frameList[2].result.protocolVersion).toBe("2024-11-05");
+});

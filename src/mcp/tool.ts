@@ -55,10 +55,14 @@ const URL_PROPERTY = {
  * namespace them by source: ara advertises these as `slack_thread_read` and so on.
  */
 const LOCAL_SEARCH_PROPERTY = {
+  include_bot: {
+    type: "boolean",
+    description: "Include bot messages; default is human-only. Threads always retain bots.",
+  },
   query: {
     type: "string",
     maxLength: 500,
-    description: "Literal case-insensitive substring, not SQL or Slack syntax.",
+    description: "Up to 5 whitespace-separated literal AND terms (ASCII case-insensitive), not SQL or Slack syntax.",
   },
   channel_id: { type: "string", description: "Cached channel ID." },
   user_id: { type: "string", description: "Author user ID." },
@@ -74,7 +78,7 @@ export const TOOL_LIST: ToolDefinition[] = [
   {
     name: "local_search",
     description:
-      "Search the readonly local Slack cache. Bounded scan, no API or model call. Read matching roots with local_thread; missing hits do not prove absence.",
+      "Search the readonly local Slack cache. Up to 5 AND terms, human-only by default, bounded scan, root_ts alias in hits. No API or model call. Read matching roots with local_thread; missing hits do not prove absence.",
     inputSchema: { type: "object", additionalProperties: false, properties: LOCAL_SEARCH_PROPERTY },
     annotations: LOCAL_ANNOTATION,
     run: localSearch,

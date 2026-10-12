@@ -11,15 +11,8 @@ export interface ModelConfig {
   max_tokens: number;
 }
 
-export const readModelConfig = (path = MODEL_CONFIG_PATH): ModelConfig => {
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()) {
-    throw new Error("Model config must be an owned regular file with mode 0600.");
-  }
-  const input = record(JSON.parse(readFileSync(path, "utf8")));
-  keys(input, ["baseURL", "model", "timeout_ms", "max_tokens"]);
-  const baseURL = text(input.baseURL ?? "http://127.0.0.1:18080/v1", "baseURL", 200);
-  const parsed = new URL(baseURL ?? "");
+export const validateEndpoint = (baseURL: string): string => {
+  const parsed = new URL(baseURL);
   // Literal loopback only, with redirects disabled on every request. Private
   // GPU hosts must use an SSH tunnel; no opt-in can send Slack text externally.
   if (
@@ -35,8 +28,19 @@ export const readModelConfig = (path = MODEL_CONFIG_PATH): ModelConfig => {
       "Model baseURL must be http://127.0.0.1:<port>/v1 or http://[::1]:<port>/v1. Use a private SSH tunnel.",
     );
   }
+  return parsed.href.replace(/\/$/, "");
+};
+
+export const readModelConfig = (path = MODEL_CONFIG_PATH): ModelConfig => {
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()) {
+    throw new Error("Model config must be an owned regular file with mode 0600.");
+  }
+  const input = record(JSON.parse(readFileSync(path, "utf8")));
+  keys(input, ["baseURL", "model", "timeout_ms", "max_tokens"]);
+  const baseURL = text(input.baseURL ?? "http://127.0.0.1:18080/v1", "baseURL", 200);
   return {
-    baseURL: parsed.href.replace(/\/$/, ""),
+    baseURL: validateEndpoint(baseURL ?? ""),
     model: text(input.model, "model", 100) ?? "",
     timeout_ms: integer(input.timeout_ms, "timeout_ms", 90_000, 120_000),
     max_tokens: integer(input.max_tokens, "max_tokens", 1800, 4096),
@@ -66,7 +70,7 @@ export type Transport = (path: string, init: RequestInit) => Promise<Response>;
 export const makeTransport =
   (config: ModelConfig): Transport =>
   (path, init) =>
-    fetch(`${config.baseURL}${path}`, {
+    fetch(`${validateEndpoint(config.baseURL)}${path}`, {
       ...init,
       redirect: "error",
       signal: AbortSignal.any([AbortSignal.timeout(config.timeout_ms), ...(init.signal ? [init.signal] : [])]),
@@ -98,7 +102,7 @@ export const jsonResponse = async (response: Response, timeoutMs = 120_000): Pro
 };
 
 export const batchBusy = async (config: ModelConfig): Promise<boolean> => {
-  const origin = new URL(config.baseURL).origin;
+  const origin = new URL(validateEndpoint(config.baseURL)).origin;
   const get = async (path: string): Promise<unknown> =>
     jsonResponse(
       await fetch(`${origin}${path}`, {

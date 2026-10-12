@@ -10,7 +10,7 @@ export const ANALYZE_HELP = `Read-only local cache analysis (JSON output):
   slack analyze <thread-url> [--mode foreground|batch] [--think]
   slack analyze ask <question> [--mode foreground|batch] [--think]
   slack analyze search [query] [--channel <id>] [--user <id>]
-      [--since <YYYY-MM-DD|ISO>] [--until <YYYY-MM-DD|ISO>] [--limit <1..50>]
+      [--since <YYYY-MM-DD|ISO>] [--until <YYYY-MM-DD|ISO>] [--limit <1..50>] [--include-bot]
   slack analyze metadata
 
 Model config: ~/.config/slack-cli/model.json (0600; loopback HTTP /v1 only).
@@ -59,7 +59,7 @@ export const localAsk = async (value: unknown): Promise<string> => {
 };
 
 export const analyze = async (rest: string[], flags: Record<string, string | boolean>): Promise<string> => {
-  keys(flags, ["channel", "user", "since", "until", "limit", "mode", "think", "json"]);
+  keys(flags, ["channel", "user", "since", "until", "limit", "mode", "think", "json", "include-bot"]);
   const [sub, ...argumentList] = rest;
   if (!sub) return ANALYZE_HELP;
   const mode = flags.mode;
@@ -75,6 +75,7 @@ export const analyze = async (rest: string[], flags: Record<string, string | boo
       user_id: flags.user,
       since: flags.since,
       until: flags.until,
+      include_bot: flags["include-bot"],
       limit: flags.limit === undefined ? undefined : Number(flags.limit),
     });
   }

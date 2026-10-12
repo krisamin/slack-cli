@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { channelId, dateSecond, integer, keys, record, text, timestamp } from "./validation";
+import { boolean, channelId, dateSecond, integer, keys, record, text, timestamp } from "./validation";
 
 export const DEFAULT_DB_PATH = join(homedir(), ".local", "share", "slack-cli", "inbox.db");
 const SCAN_MAX = 20_000;
@@ -23,6 +23,8 @@ export interface LocalMessage {
   reply_count: number;
   latest_reply: string;
   seen_at: number;
+  reaction_list?: { name: string; user_id_list: string[]; count: number; user_list_complete: boolean }[];
+  reaction_state?: "cached" | "unknown";
 }
 
 export interface Freshness {
@@ -52,6 +54,8 @@ export interface ThreadResult {
   cached_message_count: number;
   expected_reply_count: number;
   cache_incomplete: boolean;
+  edit_after_asof: boolean;
+  historical_reconstruction_supported: false;
 }
 
 export interface SearchInput {
@@ -61,14 +65,17 @@ export interface SearchInput {
   since?: string;
   until?: string;
   limit?: number;
+  include_bot?: boolean;
 }
 
 const COLUMN = "channel_id,ts,thread_ts,user,text,bot,deleted,edited_ts,reply_count,latest_reply,seen_at";
 
 export const parseSearch = (value: unknown): SearchInput => {
   const input = record(value);
-  keys(input, ["query", "channel_id", "user_id", "since", "until", "limit"]);
+  keys(input, ["query", "channel_id", "user_id", "since", "until", "limit", "include_bot"]);
   const query = text(input.query, "query", 500, true);
+  const termList = query?.trim().split(/\s+/) ?? [];
+  if (termList.length > 5) throw new Error("query accepts at most 5 whitespace-separated AND terms.");
   const channel = input.channel_id === undefined ? undefined : channelId(input.channel_id);
   const user = text(input.user_id, "user_id", 32, true);
   if (user !== undefined && !/^[UBW][A-Z0-9]+$/.test(user)) throw new Error("Invalid user_id.");
@@ -78,7 +85,15 @@ export const parseSearch = (value: unknown): SearchInput => {
   const end = dateSecond(until, "until");
   if (start !== undefined && end !== undefined && start > end) throw new Error("since must not be after until.");
   if (!query && !channel && !user && !since && !until) throw new Error("At least one search filter is required.");
-  return { query, channel_id: channel, user_id: user, since, until, limit: integer(input.limit, "limit", 20, 50) };
+  return {
+    query,
+    channel_id: channel,
+    user_id: user,
+    since,
+    until,
+    limit: integer(input.limit, "limit", 20, 50),
+    include_bot: boolean(input.include_bot, "include_bot"),
+  };
 };
 
 export const parseThread = (value: unknown): { channel_id: string; root_ts: string } => {
@@ -90,6 +105,7 @@ export const parseThread = (value: unknown): { channel_id: string; root_ts: stri
 export class LocalStore {
   readonly db: Database;
   readonly dbPath: string;
+  private readonly hasBody: boolean;
 
   constructor(dbPath = DEFAULT_DB_PATH) {
     this.dbPath = resolve(dbPath);
@@ -102,11 +118,47 @@ export class LocalStore {
       this.db.exec("PRAGMA query_only=ON; PRAGMA busy_timeout=1000;");
       this.db.query("SELECT channel_id, ts, thread_ts, text FROM message LIMIT 0").all();
       this.db.query("SELECT key, value FROM state LIMIT 0").all();
+      this.hasBody = this.db
+        .query<{ name: string }, []>("PRAGMA table_info(message)")
+        .all()
+        .some((column) => column.name === "body");
     } catch (error) {
       this.db.close();
       throw error;
     }
   }
+
+  private withReaction = (row: LocalMessage & { body?: string }): LocalMessage => {
+    const { body, ...message } = row;
+    if (!body || body.length > 100_000) return { ...message, reaction_state: "unknown" };
+    try {
+      const value: unknown = JSON.parse(body);
+      if (!value || typeof value !== "object" || !("reactions" in value) || !Array.isArray(value.reactions)) {
+        return { ...message, reaction_state: "unknown" };
+      }
+      const reactionList = value.reactions.slice(0, 30).map((item: unknown) => {
+        const input = record(item);
+        const name = text(input.name, "reaction name", 100) ?? "";
+        if (!Array.isArray(input.users) || input.users.length > 200) throw new Error("Unbounded reaction user list.");
+        const userList = input.users.map((id: unknown) => {
+          const user = text(id, "reaction user", 32) ?? "";
+          if (!/^[UW][A-Z0-9]+$/.test(user)) throw new Error("Invalid reaction user.");
+          return user;
+        });
+        const count = input.count === undefined ? userList.length : input.count;
+        if (typeof count !== "number" || !Number.isInteger(count) || count < 0)
+          throw new Error("Invalid reaction count.");
+        return { name, user_id_list: userList, count, user_list_complete: count === userList.length };
+      });
+      return {
+        ...message,
+        reaction_list: reactionList,
+        reaction_state: value.reactions.length > 30 ? "unknown" : "cached",
+      };
+    } catch {
+      return { ...message, reaction_state: "unknown" };
+    }
+  };
 
   close = (): void => this.db.close();
 
@@ -168,7 +220,7 @@ export class LocalStore {
   search = (value: SearchInput) =>
     this.snapshot(() => {
       const input = parseSearch(value);
-      const filter = ["deleted=0"];
+      const filter = ["deleted=0", ...(input.include_bot ? [] : ["bot=0"])];
       const bind: (string | number)[] = [];
       if (input.channel_id) {
         filter.push("channel_id=?");
@@ -194,32 +246,44 @@ export class LocalStore {
         this.db
           .query<{ n: number }, (string | number)[]>(`SELECT COUNT(*) n FROM (${candidateSql})`)
           .get(...bind, SCAN_MAX + 1)?.n ?? 0;
+      const termList = input.query?.trim().split(/\s+/) ?? [];
+      const termFilter = termList.length ? termList.map(() => "instr(lower(text),lower(?))>0").join(" AND ") : "1=1";
       const boundedColumn = COLUMN.replace("text,", "substr(text,1,600) text,");
       const hit = this.db
         .query<LocalMessage & { text_truncated: number }, (string | number)[]>(
           `WITH candidate AS MATERIALIZED (${candidateSql}) SELECT ${boundedColumn}, length(text)>600 text_truncated
-         FROM candidate WHERE (?='' OR instr(lower(text),lower(?))>0) ORDER BY ts DESC LIMIT ?`,
+         FROM candidate WHERE ${termFilter} ORDER BY ts DESC LIMIT ?`,
         )
-        .all(...bind, SCAN_MAX, input.query ?? "", input.query ?? "", limit + 1);
+        .all(...bind, SCAN_MAX, ...termList, limit + 1);
       return {
         freshness: this.freshness(),
-        message_list: hit.slice(0, limit).map((msg) => ({ ...msg, text_truncated: Boolean(msg.text_truncated) })),
+        message_list: hit
+          .slice(0, limit)
+          .map((msg) => ({ ...msg, root_ts: msg.thread_ts, text_truncated: Boolean(msg.text_truncated) })),
         hit_limit_reached: hit.length > limit,
         scanned_count: Math.min(count, SCAN_MAX),
         scan_truncated: count > SCAN_MAX,
+        include_bot: input.include_bot,
+        term_list: termList,
+        no_result_hint: hit.length
+          ? null
+          : "No cached hit: remove the least distinctive query term; do not only widen dates. Narrow channel/user scope when scan is truncated. Bots are excluded unless include_bot=true.",
         scope:
-          "Latest 20000 matching metadata rows; literal substring (SQLite lower, ASCII case-insensitive), not SQL or Slack search syntax.",
+          "Latest 20000 matching metadata rows; up to 5 whitespace-separated literal substring AND terms (SQLite lower, ASCII case-insensitive), not SQL or Slack search syntax.",
       };
     });
 
   thread = (value: { channel_id: string; root_ts: string }): ThreadResult =>
     this.snapshot(() => {
       const { channel_id: channel, root_ts: rootTs } = parseThread(value);
-      const root = this.db
-        .query<LocalMessage, [string, string]>(`SELECT ${COLUMN} FROM message WHERE channel_id=? AND ts=?`)
+      const rootRow = this.db
+        .query<LocalMessage & { body?: string }, [string, string]>(
+          `SELECT ${COLUMN}${this.hasBody ? ",body" : ""} FROM message WHERE channel_id=? AND ts=?`,
+        )
         .get(channel, rootTs);
-      if (!root)
+      if (!rootRow)
         throw new Error("Thread root is not cached. Sync the inbox separately; local analysis never refreshes Slack.");
+      const root = this.withReaction(rootRow);
       if (root.thread_ts !== rootTs) throw new Error("Requested timestamp is a reply, not a thread root.");
       if (root.text.length > CONTEXT_MAX)
         throw new Error("Thread root exceeds the context budget; refusing to truncate the root.");
@@ -230,10 +294,11 @@ export class LocalStore {
           )
           .get(channel, rootTs, rootTs)?.n ?? 0;
       const tail = this.db
-        .query<LocalMessage, [string, string, string, number]>(
-          `SELECT ${COLUMN} FROM message WHERE channel_id=? AND thread_ts=? AND ts<>? ORDER BY ts DESC LIMIT ?`,
+        .query<LocalMessage & { body?: string }, [string, string, string, number]>(
+          `SELECT ${COLUMN}${this.hasBody ? ",body" : ""} FROM message WHERE channel_id=? AND thread_ts=? AND ts<>? ORDER BY ts DESC LIMIT ?`,
         )
-        .all(channel, rootTs, rootTs, MESSAGE_MAX);
+        .all(channel, rootTs, rootTs, MESSAGE_MAX)
+        .map(this.withReaction);
       const selected: LocalMessage[] = [root];
       let size = root.text.length;
       for (const msg of tail) {
@@ -274,6 +339,9 @@ export class LocalStore {
           /* Metadata can exist before auth initialized the base URL. */
         }
       }
+      const asof = Number(this.state("last_sync"));
+      const editAfterAsof =
+        Number.isFinite(asof) && selected.some((msg) => Boolean(msg.edited_ts) && Number(msg.edited_ts) > asof);
       return {
         freshness: this.freshness(),
         channel_id: channel,
@@ -287,10 +355,12 @@ export class LocalStore {
         omitted_count: omittedCount,
         omitted_id_list_truncated: omittedCount > Math.min(idList.length, OMITTED_MAX),
         truncated: omittedCount > 0,
-        needs_human: omittedCount > 0 || cacheIncomplete,
+        needs_human: omittedCount > 0 || cacheIncomplete || editAfterAsof,
         cached_message_count: cachedCount,
         expected_reply_count: root.reply_count,
         cache_incomplete: cacheIncomplete,
+        edit_after_asof: editAfterAsof,
+        historical_reconstruction_supported: false,
       };
     });
 }

@@ -38,8 +38,10 @@ class RpcError extends Error {
   }
 }
 
+const protocolWrite = process.stdout.write.bind(process.stdout);
+
 const send = (payload: Record<string, unknown>): void => {
-  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...payload })}\n`);
+  protocolWrite(`${JSON.stringify({ jsonrpc: "2.0", ...payload })}\n`);
 };
 
 const errorMessage = (error: unknown): string => {
@@ -70,6 +72,7 @@ const handleMethod = async (method: string, params: Record<string, unknown>): Pr
           name: tool.name,
           description: tool.description,
           inputSchema: tool.inputSchema,
+          ...(tool.annotations ? { annotations: tool.annotations } : {}),
         })),
       };
     case "tools/call": {
@@ -78,7 +81,7 @@ const handleMethod = async (method: string, params: Record<string, unknown>): Pr
       if (!tool) {
         throw new RpcError(ERROR_CODE.invalidParam, `Unknown tool: ${name || "(none)"}`);
       }
-      const input = (params.arguments ?? {}) as Record<string, unknown>;
+      const input = (params.arguments === undefined ? {} : params.arguments) as Record<string, unknown>;
       try {
         return { content: [{ type: "text", text: await tool.run(input) }] };
       } catch (error) {
@@ -98,14 +101,19 @@ const handleLine = async (line: string): Promise<void> => {
 
   let request: RpcRequest;
   try {
-    request = JSON.parse(trimmed) as RpcRequest;
+    const value: unknown = JSON.parse(trimmed);
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      send({ id: null, error: { code: ERROR_CODE.invalidRequest, message: "Expected a JSON-RPC object" } });
+      return;
+    }
+    request = value as RpcRequest;
   } catch {
     send({ id: null, error: { code: ERROR_CODE.parse, message: "Invalid JSON" } });
     return;
   }
 
   const id = request.id;
-  const isNotification = id === undefined || id === null;
+  const isNotification = !Object.hasOwn(request, "id");
 
   if (typeof request.method !== "string") {
     if (!isNotification) {
@@ -132,14 +140,19 @@ export const runMcp = async (): Promise<void> => {
   console.log = console.error;
   console.info = console.error;
   console.warn = console.error;
+  process.stdout.write = process.stderr.write.bind(process.stderr);
 
   const reader = createInterface({ input: process.stdin });
   // Lines are dispatched without awaiting so a slow Slack call does not block
   // the next request; each reply carries its own id.
+  const pending = new Set<Promise<void>>();
   reader.on("line", (line) => {
-    void handleLine(line);
+    const task = handleLine(line);
+    pending.add(task);
+    void task.finally(() => pending.delete(task));
   });
   await new Promise<void>((resolve) => {
     reader.on("close", () => resolve());
   });
+  await Promise.allSettled(pending);
 };
