@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { type ReadFailure, recordReadFailure } from "./read-diagnostic";
 import type { LocalStore, SearchInput } from "./store";
 
 export type ReadMethod = "metadata" | "search" | "thread" | "freshness";
@@ -13,40 +15,114 @@ export const readLocal = async <M extends ReadMethod>(
   method: M,
   input: unknown = {},
 ): Promise<ReturnType<LocalStore[M]>> => {
-  // Native SQLite calls are synchronous and Bun exposes no progress handler.
-  // Isolate fixed, bound queries in a killable process for a real wall timeout.
-  const child = Bun.spawn([process.execPath, fileURLToPath(new URL("./worker.ts", import.meta.url))], {
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env },
-  });
-  const timer = setTimeout(() => child.kill("SIGKILL"), 3000);
-  child.stdin.write(JSON.stringify({ method, input }));
-  child.stdin.end();
+  const startedAt = performance.now();
+  let child: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timeoutFired = false;
+  let exitCode: number | null = null;
+  let failure: unknown;
+  let failureCaptured = false;
+  const streamJobs: Promise<string>[] = [];
+  let failureKind: ReadFailure["failure_kind"] = "worker_transport";
+  const stderrState = { bytes: 0, hash: createHash("sha256"), complete: false };
   try {
-    const read = async (stream: ReadableStream<Uint8Array>): Promise<string> => {
+    // Native SQLite is synchronous; retain the fixed killable worker3s budget.
+    child = Bun.spawn([process.execPath, fileURLToPath(new URL("./worker.ts", import.meta.url))], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env },
+    });
+    const activeChild = child;
+    timer = setTimeout(() => {
+      timeoutFired = true;
+      activeChild.kill("SIGKILL");
+    }, 3000);
+    activeChild.stdin.write(JSON.stringify({ method, input }));
+    activeChild.stdin.end();
+    const read = async (stream: ReadableStream<Uint8Array>, stderr = false): Promise<string> => {
       const reader = stream.getReader();
       const chunkList: Uint8Array[] = [];
       let size = 0;
-      while (true) {
-        const next = await reader.read();
-        if (next.done) break;
-        size += next.value.length;
-        if (size > 1_000_000) {
-          child.kill("SIGKILL");
-          throw new Error("Local read output exceeds the byte limit.");
+      try {
+        while (true) {
+          const next = await reader.read();
+          if (next.done) {
+            if (stderr) stderrState.complete = true;
+            break;
+          }
+          size += next.value.length;
+          if (stderr) {
+            stderrState.bytes += next.value.length;
+            stderrState.hash.update(next.value);
+          }
+          if (size > 1_000_000) {
+            failureKind = "output_limit";
+            activeChild.kill("SIGKILL");
+            throw new Error("Local read output exceeds the byte limit.");
+          }
+          chunkList.push(next.value);
         }
-        chunkList.push(next.value);
+      } finally {
+        void reader.cancel().catch(() => {});
       }
       return Buffer.concat(chunkList).toString("utf8");
     };
-    const [output, error, code] = await Promise.all([read(child.stdout), read(child.stderr), child.exited]);
-    if (code !== 0) throw new Error(error.trim() || "Local cache read timed out or failed.");
-    return JSON.parse(output) as ReturnType<LocalStore[M]>;
+    const outputRead = read(activeChild.stdout);
+    const errorRead = read(activeChild.stderr, true);
+    streamJobs.push(outputRead, errorRead);
+    const [output, error, code] = await Promise.all([outputRead, errorRead, activeChild.exited]);
+    exitCode = code;
+    if (code !== 0) {
+      failureKind = timeoutFired ? "timeout" : "worker_exit";
+      throw new Error(error.trim() || "Local cache read timed out or failed.");
+    }
+    try {
+      return JSON.parse(output) as ReturnType<LocalStore[M]>;
+    } catch (error) {
+      failureKind = "invalid_json";
+      throw error;
+    }
+  } catch (error) {
+    failure = error;
+    failureCaptured = true;
+    throw error;
   } finally {
     clearTimeout(timer);
-    child.kill();
+    if (child) {
+      child.kill();
+      exitCode = await child.exited;
+      await Promise.allSettled(streamJobs);
+    }
+    if (failureCaptured) {
+      try {
+        recordReadFailure({
+          method,
+          input,
+          elapsed_ms: performance.now() - startedAt,
+          worker_pid: child?.pid ?? null,
+          exit_code: exitCode,
+          signal: child?.signalCode ?? null,
+          timeout_fired: timeoutFired,
+          failure_kind: failureKind,
+          exception_class:
+            failure instanceof SyntaxError
+              ? "SyntaxError"
+              : failure instanceof TypeError
+                ? "TypeError"
+                : failure instanceof RangeError
+                  ? "RangeError"
+                  : failure instanceof Error
+                    ? "Error"
+                    : "UnknownThrownValue",
+          stderr_bytes: stderrState.bytes,
+          stderr_sha256: stderrState.hash.digest("hex"),
+          stderr_complete: stderrState.complete,
+        });
+      } catch {
+        // Optional evidence must never replace the original read/spawn exception.
+      }
+    }
   }
 };
 
