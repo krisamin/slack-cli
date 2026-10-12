@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelConfig } from "./model";
@@ -280,6 +280,8 @@ test("key headers never remove caller cancellation", async () => {
 test("a key inside a non-private or symlink parent directory is rejected", () => {
   const folder = join(directory, "public-folder");
   mkdirSync(folder, { mode: 0o755 });
+  chmodSync(folder, 0o755);
+  expect(statSync(folder).mode & 0o777).toBe(0o755);
   const path = join(folder, "app-key");
   writeFileSync(path, KEY, { mode: 0o600 });
   expect(() => readModelConfig(configFile({ api_key_file: path }))).toThrow("API key file");

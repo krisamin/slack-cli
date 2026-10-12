@@ -14,6 +14,7 @@ export interface LocalReader {
 export const readLocal = async <M extends ReadMethod>(
   method: M,
   input: unknown = {},
+  readDiagnosticFile?: string,
 ): Promise<ReturnType<LocalStore[M]>> => {
   const startedAt = performance.now();
   let child: Bun.Subprocess<"pipe", "pipe", "pipe"> | undefined;
@@ -96,29 +97,32 @@ export const readLocal = async <M extends ReadMethod>(
     }
     if (failureCaptured) {
       try {
-        recordReadFailure({
-          method,
-          input,
-          elapsed_ms: performance.now() - startedAt,
-          worker_pid: child?.pid ?? null,
-          exit_code: exitCode,
-          signal: child?.signalCode ?? null,
-          timeout_fired: timeoutFired,
-          failure_kind: failureKind,
-          exception_class:
-            failure instanceof SyntaxError
-              ? "SyntaxError"
-              : failure instanceof TypeError
-                ? "TypeError"
-                : failure instanceof RangeError
-                  ? "RangeError"
-                  : failure instanceof Error
-                    ? "Error"
-                    : "UnknownThrownValue",
-          stderr_bytes: stderrState.bytes,
-          stderr_sha256: stderrState.hash.digest("hex"),
-          stderr_complete: stderrState.complete,
-        });
+        recordReadFailure(
+          {
+            method,
+            input,
+            elapsed_ms: performance.now() - startedAt,
+            worker_pid: child?.pid ?? null,
+            exit_code: exitCode,
+            signal: child?.signalCode ?? null,
+            timeout_fired: timeoutFired,
+            failure_kind: failureKind,
+            exception_class:
+              failure instanceof SyntaxError
+                ? "SyntaxError"
+                : failure instanceof TypeError
+                  ? "TypeError"
+                  : failure instanceof RangeError
+                    ? "RangeError"
+                    : failure instanceof Error
+                      ? "Error"
+                      : "UnknownThrownValue",
+            stderr_bytes: stderrState.bytes,
+            stderr_sha256: stderrState.hash.digest("hex"),
+            stderr_complete: stderrState.complete,
+          },
+          readDiagnosticFile,
+        );
       } catch {
         // Optional evidence must never replace the original read/spawn exception.
       }
@@ -126,9 +130,9 @@ export const readLocal = async <M extends ReadMethod>(
   }
 };
 
-export const makeLocalReader = (): LocalReader => ({
-  metadata: () => readLocal("metadata"),
-  freshness: () => readLocal("freshness"),
-  search: (input) => readLocal("search", input),
-  thread: (input) => readLocal("thread", input),
+export const makeLocalReader = (readDiagnosticFile?: string): LocalReader => ({
+  metadata: () => readLocal("metadata", {}, readDiagnosticFile),
+  freshness: () => readLocal("freshness", {}, readDiagnosticFile),
+  search: (input) => readLocal("search", input, readDiagnosticFile),
+  thread: (input) => readLocal("thread", input, readDiagnosticFile),
 });

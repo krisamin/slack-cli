@@ -23,7 +23,7 @@ import {
   parseMode,
   readModelConfig,
 } from "./model";
-import { makeLocalReader } from "./read";
+import { type LocalReader, makeLocalReader } from "./read";
 import type { LocalMessage, LocalStore, ThreadResult } from "./store";
 import { parseSearch, parseThread } from "./store";
 import { boolean, channelId, keys, record, text, timestamp } from "./validation";
@@ -249,10 +249,11 @@ const runAnalysis = async (input: AnalyzeInput | AskInput, dependency: AnalysisD
     ? (text(raw.question, "question", 2000) ?? "")
     : "Analyze this thread's current reply/task status.";
   const target = ask ? null : parseThread({ channel_id: raw.channel_id, root_ts: raw.root_ts });
-  const store = dependency.store ?? makeLocalReader();
+  let store: LocalStore | LocalReader | undefined = dependency.store;
   let release: (() => void) | null = null;
   try {
     const config = dependency.config ?? readModelConfig();
+    store ??= makeLocalReader(config.read_diagnostic_file);
     const transport = dependency.transport ?? makeTransport(config);
     const countTransport = dependency.countTransport ?? transport;
     const abort = new AbortController();
@@ -601,7 +602,7 @@ const runAnalysis = async (input: AnalyzeInput | AskInput, dependency: AnalysisD
     }
     throw new Error("Model exceeded its iteration budget without a final result.");
   } catch (error) {
-    if (mode === "batch" && error instanceof GatewayBusyError) {
+    if (store && mode === "batch" && error instanceof GatewayBusyError) {
       return {
         status: "busy" as const,
         mode,
