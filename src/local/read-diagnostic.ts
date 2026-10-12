@@ -79,9 +79,15 @@ const safeInput = (method: string, value: unknown): unknown => {
 };
 
 /** Best-effort, failure-only local evidence. Never prints or changes the tool error. */
-export const recordReadFailure = (failure: ReadFailure): void => {
-  const configPath = process.env[READ_DIAGNOSTIC_ENV];
-  if (!configPath || !["metadata", "freshness", "search", "thread"].includes(failure.method)) return;
+export const recordReadFailure = (failure: ReadFailure, explicitConfigPath?: string): void => {
+  // Explicit selection takes precedence even if invalid; never fall back to a different private sink.
+  const configPath = explicitConfigPath === undefined ? process.env[READ_DIAGNOSTIC_ENV] : explicitConfigPath;
+  if (
+    typeof configPath !== "string" ||
+    !configPath ||
+    !["metadata", "freshness", "search", "thread"].includes(failure.method)
+  )
+    return;
   let configFd: number | undefined;
   let directoryFd: number | undefined;
   let receiptFd: number | undefined;

@@ -22,6 +22,8 @@ export interface ModelConfig {
   timeout_ms: number;
   max_tokens: number;
   api_key_file?: string;
+  /** Failure-only diagnostic option; not opened while loading model settings. */
+  read_diagnostic_file?: string;
   admission?: "direct" | "gateway";
 }
 
@@ -96,7 +98,7 @@ export const readModelConfig = (path = MODEL_CONFIG_PATH): ModelConfig => {
     throw new Error("Model config must be an owned regular file with mode 0600.");
   }
   const input = record(JSON.parse(readFileSync(path, "utf8")));
-  keys(input, ["baseURL", "model", "timeout_ms", "max_tokens", "api_key_file", "admission"]);
+  keys(input, ["baseURL", "model", "timeout_ms", "max_tokens", "api_key_file", "admission", "read_diagnostic_file"]);
   let admission: "direct" | "gateway" | undefined;
   if (Object.hasOwn(input, "admission")) {
     if (input.admission !== "direct" && input.admission !== "gateway")
@@ -109,6 +111,12 @@ export const readModelConfig = (path = MODEL_CONFIG_PATH): ModelConfig => {
     if (!apiKeyFile || !isAbsolute(apiKeyFile)) throw new Error("api_key_file must be an absolute file path.");
     readApiKeyFile(apiKeyFile);
   }
+  let readDiagnosticFile: string | undefined;
+  if (Object.hasOwn(input, "read_diagnostic_file")) {
+    readDiagnosticFile = text(input.read_diagnostic_file, "read_diagnostic_file", 1024);
+    if (!readDiagnosticFile || !isAbsolute(readDiagnosticFile))
+      throw new Error("read_diagnostic_file must be an absolute file path.");
+  }
   if (admission === "gateway" && apiKeyFile === undefined) throw new Error("Gateway admission requires api_key_file.");
   const baseURL = text(input.baseURL ?? "http://127.0.0.1:18080/v1", "baseURL", 200);
   return {
@@ -118,6 +126,7 @@ export const readModelConfig = (path = MODEL_CONFIG_PATH): ModelConfig => {
     max_tokens: integer(input.max_tokens, "max_tokens", 1800, 4096),
     ...(apiKeyFile === undefined ? {} : { api_key_file: apiKeyFile }),
     ...(admission === undefined ? {} : { admission }),
+    ...(readDiagnosticFile === undefined ? {} : { read_diagnostic_file: readDiagnosticFile }),
   };
 };
 
