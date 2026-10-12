@@ -246,7 +246,7 @@ It does not store the key itself:
 The key file must be a regular file owned by the current user with permissions
 exactly `0600`. Its content is one nonempty printable ASCII token, at most 4096
 bytes, optionally followed by one newline. Relative paths, final symlinks,
-missing files, unsafe permissions, empty content and multiline values are
+missing files, a non-private parent directory, unsafe permissions, empty content and multiline values are
 rejected before an HTTP request. The key is re-read for each request, sent only
 as a Bearer header, and is never included in parsed configuration or errors.
 Literal loopback `/v1` addresses and redirect rejection remain mandatory.
@@ -257,6 +257,30 @@ search and thread tools do not read model configuration or keys. The direct
 `/health` and `/slots` batch checks use the same optional header; these status
 reads do not provide global atomic admission across applications. A gateway's
 separate admission contract must be validated before routing batch work to it.
+
+### Gateway admission
+
+Set `"admission": "gateway"` in the private model configuration only after the
+non-streaming gateway contract has been validated. This opt-in requires
+`api_key_file`. Omitting `admission`, or setting it to `"direct"`, preserves the
+existing direct `/health` and `/slots` batch preflight.
+
+Gateway mode does not read private runtime status. Each completion POST is
+admitted atomically by the gateway. Initial deployment is one replica and one
+worker with one shared physical backend, one in-flight request and no queue.
+Only HTTP `503` with JSON `error.type === "overloaded_error"` and string
+`error.code === "503"` is a batch `status:"busy"` skip. Foreground returns an
+explicit retry-later error. Upstream `503`, another error type/code, `401`/`403`,
+connection failure or invalid JSON remain errors, not successful analysis or
+an admission skip. Requests are not retried automatically.
+
+The caller deadline covers headers and the full response body and aborts the
+same HTTP chain. Foreground total remains 120 seconds, batch 30 seconds and
+these two MCP tools declare 150 seconds. No new deadline or priority headers
+are sent, and the current non-streaming payload is unchanged. Gateway provider
+read timeouts are not an absolute SSE-body guarantee. Single-worker admission
+is not an HA global limit, and mock cancellation is not proof of GPU slot
+release; those operating gates require separate acceptance.
 
 ## MCP server
 

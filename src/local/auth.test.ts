@@ -276,3 +276,16 @@ test("key headers never remove caller cancellation", async () => {
     server.stop(true);
   }
 });
+
+test("a key inside a non-private or symlink parent directory is rejected", () => {
+  const folder = join(directory, "public-folder");
+  mkdirSync(folder, { mode: 0o755 });
+  const path = join(folder, "app-key");
+  writeFileSync(path, KEY, { mode: 0o600 });
+  expect(() => readModelConfig(configFile({ api_key_file: path }))).toThrow("API key file");
+  chmodSync(folder, 0o700);
+  expect(readModelConfig(configFile({ api_key_file: path }))).toMatchObject({ api_key_file: path });
+  const link = join(directory, "linked-folder");
+  symlinkSync(folder, link);
+  expect(() => readModelConfig(configFile({ api_key_file: join(link, "app-key") }))).toThrow("API key file");
+});

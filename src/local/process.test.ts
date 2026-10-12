@@ -10,6 +10,7 @@ let home = "";
 let model: ReturnType<typeof Bun.serve> | undefined;
 let received = 0;
 let expectedApiKey: string | undefined;
+let gatewayBusyResponse = false;
 let authorizationList: (string | null)[] = [];
 const root = "1790000000.000001";
 const message = "Review assigned to <@UTEST2>.";
@@ -41,6 +42,7 @@ beforeEach(() => {
   db.close();
   received = 0;
   expectedApiKey = undefined;
+  gatewayBusyResponse = false;
   authorizationList = [];
   model = Bun.serve({
     port: 0,
@@ -52,6 +54,11 @@ beforeEach(() => {
       if (expectedApiKey && request.headers.get("authorization") !== `Bearer ${expectedApiKey}`) {
         return new Response(`Denied synthetic-secret-reflection ${expectedApiKey}`, { status: 401 });
       }
+      if (gatewayBusyResponse)
+        return Response.json(
+          { error: { type: "overloaded_error", code: "503", message: "synthetic private prompt must not leak" } },
+          { status: 503 },
+        );
       const body = (await request.json()) as { messages: { content: string }[] };
       expect(body.messages[1]?.content).toContain(message);
       await Bun.sleep(100);
@@ -285,4 +292,41 @@ test("MCP wrong-key failure is one request, reflects no secret and never bypasse
   expect(mcp.output).not.toContain("synthetic-wrong-process-key");
   expect(mcp.output).not.toContain(keyPath);
   expect(received).toBe(1);
+});
+
+test("MCP gateway batch overload is busy data while foreground is explicit isError", async () => {
+  const keyPath = join(home, ".config/slack-cli/app-key");
+  const key = "synthetic-gateway-process-key";
+  writeFileSync(keyPath, key, { mode: 0o600 });
+  writeFileSync(
+    join(home, ".config/slack-cli/model.json"),
+    JSON.stringify({
+      baseURL: `http://127.0.0.1:${model?.port}/v1`,
+      model: "synthetic",
+      timeout_ms: 1000,
+      api_key_file: keyPath,
+      admission: "gateway",
+    }),
+    { mode: 0o600 },
+  );
+  expectedApiKey = key;
+  gatewayBusyResponse = true;
+  const batch = await command(
+    ["mcp"],
+    `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "local_analyze", arguments: { channel_id: "CTEST1", root_ts: root, mode: "batch" } } })}\n`,
+  );
+  expect(batch.code).toBe(0);
+  const batchResult = JSON.parse(batch.output).result;
+  expect(batchResult.isError).not.toBe(true);
+  expect(JSON.parse(batchResult.content[0].text).status).toBe("busy");
+  const foreground = await command(
+    ["mcp"],
+    `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "local_analyze", arguments: { channel_id: "CTEST1", root_ts: root } } })}\n`,
+  );
+  expect(foreground.code).toBe(0);
+  expect(JSON.parse(foreground.output).result.isError).toBe(true);
+  expect(foreground.output).toContain("retry later");
+  expect(received).toBe(2);
+  expect(batch.output + foreground.output).not.toContain("synthetic private prompt");
+  expect(batch.output + foreground.output).not.toContain(key);
 });
