@@ -1,3 +1,4 @@
+import { localAnalyze, localAsk, localMetadata, localSearch, localThread } from "../commands/analyze";
 import { authTest } from "../commands/auth";
 import { draftList, draftRemove, draftWrite } from "../commands/draft";
 import { file } from "../commands/file";
@@ -8,6 +9,7 @@ export interface ToolDefinition {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  annotations?: Record<string, boolean>;
   run: (input: Record<string, unknown>) => Promise<string>;
 }
 
@@ -52,7 +54,78 @@ const URL_PROPERTY = {
  * Every tool returns text. Names are kept short because a host may already
  * namespace them by source: ara advertises these as `slack_thread_read` and so on.
  */
+const LOCAL_SEARCH_PROPERTY = {
+  query: {
+    type: "string",
+    maxLength: 500,
+    description: "Literal case-insensitive substring, not SQL or Slack syntax.",
+  },
+  channel_id: { type: "string", description: "Cached channel ID." },
+  user_id: { type: "string", description: "Author user ID." },
+  since: { type: "string", description: "Inclusive UTC date or timezone-qualified ISO timestamp." },
+  until: { type: "string", description: "Exclusive UTC date or timezone-qualified ISO timestamp." },
+  limit: { type: "integer", minimum: 1, maximum: 50 },
+};
+const LOCAL_THREAD_PROPERTY = { channel_id: { type: "string" }, root_ts: { type: "string" } };
+const LOCAL_MODEL_PROPERTY = { mode: { type: "string", enum: ["foreground", "batch"] }, think: { type: "boolean" } };
+const LOCAL_ANNOTATION = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+
 export const TOOL_LIST: ToolDefinition[] = [
+  {
+    name: "local_search",
+    description:
+      "Search the readonly local Slack cache. Bounded scan, no API or model call. Read matching roots with local_thread; missing hits do not prove absence.",
+    inputSchema: { type: "object", additionalProperties: false, properties: LOCAL_SEARCH_PROPERTY },
+    annotations: LOCAL_ANNOTATION,
+    run: localSearch,
+  },
+  {
+    name: "local_thread",
+    description:
+      "Read a cached thread's full root and bounded tail. JSON includes omissions, cache completeness and freshness. Never syncs or changes the inbox.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: LOCAL_THREAD_PROPERTY,
+      required: ["channel_id", "root_ts"],
+    },
+    annotations: LOCAL_ANNOTATION,
+    run: localThread,
+  },
+  {
+    name: "local_metadata",
+    description:
+      "Read cache workspace/self_user, freshness and up to 100 channel IDs/names. No model, network or mutation.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    annotations: LOCAL_ANNOTATION,
+    run: localMetadata,
+  },
+  {
+    name: "local_analyze",
+    description:
+      "Analyze cached thread reply/task status with the private loopback model. Validates exact evidence. Advisory JSON only; no inbox acknowledgement, drafts or sends. Batch skips busy capacity.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { ...LOCAL_THREAD_PROPERTY, ...LOCAL_MODEL_PROPERTY },
+      required: ["channel_id", "root_ts"],
+    },
+    annotations: LOCAL_ANNOTATION,
+    run: localAnalyze,
+  },
+  {
+    name: "local_ask",
+    description:
+      "Ask the local model about the cache using an actual readonly search/thread/metadata loop (6 iterations/12 calls). Validated evidence JSON, or error/busy. Never mutates Slack/inbox.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { question: { type: "string", maxLength: 2000 }, ...LOCAL_MODEL_PROPERTY },
+      required: ["question"],
+    },
+    annotations: LOCAL_ANNOTATION,
+    run: localAsk,
+  },
   {
     name: "thread_read",
     description:
