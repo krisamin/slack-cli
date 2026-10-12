@@ -76,6 +76,7 @@ const dependency = (transport: Transport): AnalysisDependency => ({
   store,
   config: CONFIG,
   transport,
+  countTransport: async () => Response.json({ input_tokens: 1000, object: "response.input_tokens" }),
   lockDirectory: join(directory, "lock"),
 });
 const digest = (): string => createHash("sha256").update(readFileSync(path)).digest("hex");

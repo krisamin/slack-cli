@@ -1,3 +1,18 @@
+import {
+  CONTEXT_SAFETY_TOKEN,
+  CONTEXT_TOKEN_MAX,
+  CONTEXT_WIRE_MAX,
+  COUNT_REQUEST_MAX,
+  COUNT_TIMEOUT_MS,
+  countedInputTokens,
+  type FrozenRequest,
+  freezeRequest,
+  metadataView,
+  type ProjectionOmission,
+  requestFits,
+  searchView,
+  uniqueVisibleMessages,
+} from "./context";
 import type { ChatMessage, ModelConfig, RunMode, ToolCall, Transport } from "./model";
 import {
   acquireModel,
@@ -15,8 +30,6 @@ import { boolean, channelId, keys, record, text, timestamp } from "./validation"
 
 const MAX_ITERATION = 6;
 const MAX_CALL = 12;
-const OUTPUT_MAX = 50_000;
-const TOTAL_CONTEXT_MAX = 100_000;
 
 export const STATUS_SCHEMA = {
   type: "object",
@@ -209,6 +222,8 @@ export interface AnalysisDependency {
   store?: LocalStore;
   config?: ModelConfig;
   transport?: Transport;
+  // Optional adapter seam; production defaults to the same authenticated Transport.
+  countTransport?: Transport;
   lockDirectory?: string;
   isBatchBusy?: () => Promise<boolean>;
 }
@@ -239,19 +254,25 @@ const runAnalysis = async (input: AnalyzeInput | AskInput, dependency: AnalysisD
   try {
     const config = dependency.config ?? readModelConfig();
     const transport = dependency.transport ?? makeTransport(config);
+    const countTransport = dependency.countTransport ?? transport;
     const abort = new AbortController();
     const totalBudget = mode === "batch" ? 30_000 : 120_000;
     const startedAt = Date.now();
-    const boundedResponse = async (path: string, init: RequestInit): Promise<unknown> => {
+    const boundedResponse = async (
+      path: string,
+      init: RequestInit,
+      selectedTransport = transport,
+      requestLimit = config.timeout_ms,
+    ): Promise<unknown> => {
       const left = totalBudget - (Date.now() - startedAt);
       if (left <= 0) throw new Error("Analysis exceeded its total time budget.");
-      const budget = Math.min(config.timeout_ms, left);
+      const budget = Math.min(config.timeout_ms, requestLimit, left);
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         return await Promise.race([
           (async () => {
             const started = Date.now();
-            const response = await transport(path, { ...init, signal: abort.signal });
+            const response = await selectedTransport(path, { ...init, signal: abort.signal });
             try {
               return await modelResponse(response, config, Math.max(1, budget - (Date.now() - started)));
             } catch (error) {
@@ -294,30 +315,135 @@ const runAnalysis = async (input: AnalyzeInput | AskInput, dependency: AnalysisD
       };
     const corpus: LocalMessage[] = [];
     const threadList: ThreadResult[] = [];
-    let contextSize = 0;
+    // Keep original tool results separate from model projections. They are not valid final quote evidence until read as a thread.
+    const rawSearchResultList: ReturnType<LocalStore["search"]>[] = [];
+    const rawMetadataResultList: ReturnType<LocalStore["metadata"]>[] = [];
+    let countRequests = 0;
+    let generationRequests = 0;
+    const countedBodyHashList: string[] = [];
+    let maximumPromptTokens = 0;
+    const channelScope = new Set<string>();
+    const projectionOmissionList: ProjectionOmission[] = [];
+    const initialMetadata = await store.metadata();
+    rawMetadataResultList.push(initialMetadata);
     let searched = false;
     let calls = 0;
     const callIdSet = new Set<string>();
     let searchIncomplete = false;
-    const evidenceFreshnessList = [(await store.metadata()).freshness];
+    const evidenceFreshnessList = [initialMetadata.freshness];
     const addThread = (result: ThreadResult): ThreadResult => {
       corpus.push(...result.message_list);
-      threadList.push(result);
+      channelScope.add(result.channel_id);
+      const previous = threadList.find(
+        (thread) => thread.channel_id === result.channel_id && thread.root_ts === result.root_ts,
+      );
+      if (previous) {
+        const stable = (thread: ThreadResult) => ({
+          ...modelThread(thread),
+          freshness: { ...thread.freshness, fetched_at: null },
+        });
+        if (JSON.stringify(stable(previous)) !== JSON.stringify(stable(result)))
+          throw new Error("Read thread revision or freshness changed; context cannot be deduplicated safely.");
+      } else threadList.push(result);
       evidenceFreshnessList.push(result.freshness);
       return result;
     };
+    const initialThread = target ? addThread(await store.thread(target)) : null;
+    const firstMetadataProjection = metadataView(initialMetadata, channelScope);
+    if (firstMetadataProjection.omission.omitted_count) projectionOmissionList.push(firstMetadataProjection.omission);
     const messageList: ChatMessage[] = [
       { role: "system", content: SYSTEM },
       {
         role: "user",
         content: JSON.stringify({
           question,
-          metadata: await store.metadata(),
-          ...(target ? { thread: modelThread(addThread(await store.thread(target))) } : {}),
+          metadata: firstMetadataProjection.view,
+          ...(initialThread ? { thread: modelThread(initialThread) } : {}),
         }),
       },
     ];
     let finalPhase = !ask;
+    const noteOmission = (omission: ProjectionOmission): void => {
+      if (!omission.omitted_count) return;
+      if (!projectionOmissionList.some((previous) => JSON.stringify(previous) === JSON.stringify(omission)))
+        projectionOmissionList.push(omission);
+    };
+    let finalVisibleCorpus: LocalMessage[] = [];
+    const makeFinalMessages = (): ChatMessage[] => {
+      const projected = metadataView(initialMetadata, channelScope);
+      noteOmission(projected.omission);
+      // Every fetched thread message remains visible; no relevance guesses or substring truncation.
+      finalVisibleCorpus = uniqueVisibleMessages(threadList.flatMap((thread) => thread.message_list));
+      // The final validator is tied to messages actually present in this final pack, not hidden host history.
+      uniqueVisibleMessages(corpus);
+      return [
+        { role: "system", content: SYSTEM },
+        {
+          role: "user",
+          content: JSON.stringify({
+            question,
+            metadata: projected.view,
+            untrusted_data: true,
+            ...(target
+              ? {
+                  thread: modelThread(
+                    threadList[0] ??
+                      (() => {
+                        throw new Error("Final context is missing its fetched thread.");
+                      })(),
+                  ),
+                }
+              : { thread_list: threadList.map(modelThread) }),
+            projection_omission_list: projectionOmissionList,
+            search_incomplete: searchIncomplete,
+            instruction:
+              "Return ONLY the final evidence-grounded status JSON. Cite only thread messages in this input. No tools are available.",
+          }),
+        },
+      ];
+    };
+    const freezeBody = (messages: ChatMessage[], final: boolean): FrozenRequest =>
+      freezeRequest(
+        {
+          model: config.model,
+          messages,
+          ...(final
+            ? {
+                response_format: {
+                  type: "json_schema",
+                  json_schema: { name: "slack_local_status", strict: true, schema: STATUS_SCHEMA },
+                },
+              }
+            : {
+                tools: MODEL_TOOL_LIST,
+                tool_choice: searched && threadList.length ? "auto" : "required",
+                parallel_tool_calls: false,
+              }),
+          temperature: 0,
+          seed: 42,
+          max_tokens: config.max_tokens,
+          chat_template_kwargs: { enable_thinking: think },
+        },
+        config.max_tokens,
+      );
+    const admitRequest = async (request: FrozenRequest): Promise<boolean> => {
+      if (request.wire_bytes > CONTEXT_WIRE_MAX) return false;
+      if (countRequests >= COUNT_REQUEST_MAX) throw new Error("Analysis input token count budget exceeded.");
+      countRequests++;
+      const counted = await boundedResponse(
+        "/chat/completions/input_tokens",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: request.body,
+        },
+        countTransport,
+        COUNT_TIMEOUT_MS,
+      );
+      const inputTokens = countedInputTokens(counted);
+      maximumPromptTokens = Math.max(maximumPromptTokens, inputTokens);
+      return requestFits(request, inputTokens);
+    };
     const trace: { name: string; argument: Record<string, unknown> }[] = [];
     for (let iteration = 0; iteration < MAX_ITERATION; iteration++) {
       if (ask && iteration === MAX_ITERATION - 1 && !finalPhase) {
@@ -330,33 +456,29 @@ const runAnalysis = async (input: AnalyzeInput | AskInput, dependency: AnalysisD
             "Investigation budget reached. Return the final evidence-grounded status JSON now. No tools are available.",
         });
       }
-      contextSize = JSON.stringify(messageList).length;
       if (Date.now() - startedAt > totalBudget) throw new Error("Analysis exceeded its total time budget.");
-      if (contextSize > TOTAL_CONTEXT_MAX) throw new Error("Analysis context exceeds the cumulative budget.");
+      if (ask && (calls >= MAX_CALL || countRequests >= COUNT_REQUEST_MAX - 1) && !finalPhase) {
+        if (!searched || !threadList.length)
+          throw new Error("Model exceeded its tool call budget without search and thread retrieval.");
+        finalPhase = true;
+      }
+      let request = freezeBody(finalPhase ? makeFinalMessages() : messageList, finalPhase);
+      if (!(await admitRequest(request))) {
+        if (finalPhase || !searched || !threadList.length)
+          throw new Error("Analysis required evidence exceeds the model context budget; no analysis accepted.");
+        finalPhase = true;
+        request = freezeBody(makeFinalMessages(), true);
+        if (!(await admitRequest(request)))
+          throw new Error("Analysis required evidence exceeds the model context budget; no analysis accepted.");
+      }
+      // Count and generation use the exact same frozen JSON body. No automatic fallback/route bypass.
+      generationRequests++;
+      countedBodyHashList.push(request.body_sha256);
       const response = record(
         await boundedResponse("/chat/completions", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            model: config.model,
-            messages: messageList,
-            ...(finalPhase
-              ? {
-                  response_format: {
-                    type: "json_schema",
-                    json_schema: { name: "slack_local_status", strict: true, schema: STATUS_SCHEMA },
-                  },
-                }
-              : {
-                  tools: MODEL_TOOL_LIST,
-                  tool_choice: searched && threadList.length ? "auto" : "required",
-                  parallel_tool_calls: false,
-                }),
-            temperature: 0,
-            seed: 42,
-            max_tokens: config.max_tokens,
-            chat_template_kwargs: { enable_thinking: think },
-          }),
+          body: request.body,
         }),
       );
       if (!Array.isArray(response.choices) || response.choices.length !== 1)
@@ -385,19 +507,13 @@ const runAnalysis = async (input: AnalyzeInput | AskInput, dependency: AnalysisD
           switch (call.function.name) {
             case "search": {
               const found = await store.search(parseSearch(argument));
-              output = {
-                ...found,
-                message_list: found.message_list.map((msg) => ({
-                  channel_id: msg.channel_id,
-                  ts: msg.ts,
-                  thread_ts: msg.thread_ts,
-                  root_ts: msg.root_ts,
-                  user: msg.user,
-                  text: msg.text,
-                  text_truncated: msg.text_truncated,
-                })),
-              };
-              searchIncomplete ||= record(output).scan_truncated === true || record(output).hit_limit_reached === true;
+              rawSearchResultList.push(found);
+              for (const message of found.message_list) channelScope.add(message.channel_id);
+              const projected = searchView(found);
+              output = projected.view;
+              noteOmission(projected.omission);
+              searchIncomplete ||=
+                found.scan_truncated || found.hit_limit_reached || projected.omission.omitted_count > 0;
               searched = true;
               break;
             }
@@ -407,13 +523,21 @@ const runAnalysis = async (input: AnalyzeInput | AskInput, dependency: AnalysisD
               break;
             case "metadata":
               keys(argument, []);
-              output = await store.metadata();
+              {
+                const rawMetadata = await store.metadata();
+                rawMetadataResultList.push(rawMetadata);
+                const projected = metadataView(rawMetadata, channelScope);
+                output = projected.view;
+                noteOmission(projected.omission);
+              }
               break;
             default:
               throw new Error(`Model requested an unknown tool: ${call.function.name}`);
           }
           const content = JSON.stringify({ untrusted_data: true, result: output });
-          if (content.length > OUTPUT_MAX) throw new Error("Local tool output exceeds its context budget.");
+          // Raw thread evidence is kept locally and in the final pack. Capacity is checked before any next request.
+          if (Buffer.byteLength(content, "utf8") > CONTEXT_WIRE_MAX && !threadList.length)
+            throw new Error("Local tool output exceeds its context budget.");
           trace.push({ name: call.function.name, argument });
           messageList.push({ role: "tool", tool_call_id: call.id, content });
         }
@@ -433,13 +557,14 @@ const runAnalysis = async (input: AnalyzeInput | AskInput, dependency: AnalysisD
         });
         continue;
       }
-      const status = validateStatus(JSON.parse(message.content), corpus);
+      const status = validateStatus(JSON.parse(message.content), finalVisibleCorpus);
       evidenceFreshnessList.push(await store.freshness());
       const changed = evidenceFreshnessList.some((entry) => entry.db_fingerprint !== freshness.db_fingerprint);
       status.needs_human ||=
         threadList.some((result) => result.needs_human) ||
         changed ||
         searchIncomplete ||
+        projectionOmissionList.length > 0 ||
         !(await store.metadata()).self_user;
       return {
         status: "ok" as const,
@@ -452,6 +577,20 @@ const runAnalysis = async (input: AnalyzeInput | AskInput, dependency: AnalysisD
         evidence_freshness_list: evidenceFreshnessList,
         cache_changed: changed,
         search_incomplete: searchIncomplete,
+        model_context_incomplete: projectionOmissionList.length > 0,
+        model_context_omission_list: projectionOmissionList,
+        context_budget: {
+          context_tokens: CONTEXT_TOKEN_MAX,
+          output_reserve: config.max_tokens,
+          safety_reserve: CONTEXT_SAFETY_TOKEN,
+          count_requests: countRequests,
+          generation_requests: generationRequests,
+          maximum_counted_input_tokens: maximumPromptTokens,
+          counted_generation_body_sha256_list: countedBodyHashList,
+          raw_search_result_count: rawSearchResultList.length,
+          raw_metadata_result_count: rawMetadataResultList.length,
+          required_thread_message_count: finalVisibleCorpus.length,
+        },
         tool_trace: trace,
         truncated: threadList.some((result) => result.truncated),
         omitted_id_list: threadList.flatMap((result) =>

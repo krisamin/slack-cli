@@ -48,17 +48,24 @@ beforeEach(() => {
     port: 0,
     hostname: "127.0.0.1",
     fetch: async (request) => {
-      if (new URL(request.url).pathname !== "/v1/chat/completions") return new Response("not found", { status: 404 });
-      received++;
-      authorizationList.push(request.headers.get("authorization"));
+      const route = new URL(request.url).pathname;
+      if (route !== "/v1/chat/completions" && route !== "/v1/chat/completions/input_tokens")
+        return new Response("not found", { status: 404 });
+      if (route === "/v1/chat/completions") received++;
+      if (route === "/v1/chat/completions") authorizationList.push(request.headers.get("authorization"));
       if (expectedApiKey && request.headers.get("authorization") !== `Bearer ${expectedApiKey}`) {
+        if (route === "/v1/chat/completions/input_tokens") received++;
         return new Response(`Denied synthetic-secret-reflection ${expectedApiKey}`, { status: 401 });
       }
-      if (gatewayBusyResponse)
+      if (gatewayBusyResponse) {
+        if (route === "/v1/chat/completions/input_tokens") received++;
         return Response.json(
           { error: { type: "overloaded_error", code: "503", message: "synthetic private prompt must not leak" } },
           { status: 503 },
         );
+      }
+      if (route === "/v1/chat/completions/input_tokens")
+        return Response.json({ input_tokens: 1000, object: "response.input_tokens" });
       const body = (await request.json()) as { messages: { content: string }[] };
       expect(body.messages[1]?.content).toContain(message);
       await Bun.sleep(100);
