@@ -9,6 +9,9 @@ const entry = fileURLToPath(new URL("../index.ts", import.meta.url));
 let home = "";
 let model: ReturnType<typeof Bun.serve> | undefined;
 let received = 0;
+let expectedApiKey: string | undefined;
+let gatewayBusyResponse = false;
+let authorizationList: (string | null)[] = [];
 const root = "1790000000.000001";
 const message = "Review assigned to <@UTEST2>.";
 const status = {
@@ -38,12 +41,24 @@ beforeEach(() => {
   db.query("INSERT INTO message VALUES ('CTEST1',?,?,'UTEST2',?,0,0,'',0,'',1)").run(root, root, message);
   db.close();
   received = 0;
+  expectedApiKey = undefined;
+  gatewayBusyResponse = false;
+  authorizationList = [];
   model = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     fetch: async (request) => {
       if (new URL(request.url).pathname !== "/v1/chat/completions") return new Response("not found", { status: 404 });
       received++;
+      authorizationList.push(request.headers.get("authorization"));
+      if (expectedApiKey && request.headers.get("authorization") !== `Bearer ${expectedApiKey}`) {
+        return new Response(`Denied synthetic-secret-reflection ${expectedApiKey}`, { status: 401 });
+      }
+      if (gatewayBusyResponse)
+        return Response.json(
+          { error: { type: "overloaded_error", code: "503", message: "synthetic private prompt must not leak" } },
+          { status: 503 },
+        );
       const body = (await request.json()) as { messages: { content: string }[] };
       expect(body.messages[1]?.content).toContain(message);
       await Bun.sleep(100);
@@ -195,4 +210,123 @@ test("MCP protocol parser errors and old initialize version are preserved", asyn
   expect(frameList[0].error.code).toBe(-32700);
   expect(frameList[1].error.code).toBe(-32600);
   expect(frameList[2].result.protocolVersion).toBe("2024-11-05");
+});
+
+test("raw local MCP reads do not parse model auth configuration or call a model", async () => {
+  const configPath = join(home, ".config/slack-cli/model.json");
+  writeFileSync(configPath, '{"api_key_file":"unsafe-relative-key"}', { mode: 0o600 });
+  const requestList = [
+    { name: "local_metadata", arguments: {} },
+    { name: "local_search", arguments: { query: "Review" } },
+    { name: "local_thread", arguments: { channel_id: "CTEST1", root_ts: root } },
+  ];
+  for (const [i, request] of requestList.entries()) {
+    const result = await command(
+      ["mcp"],
+      `${JSON.stringify({ jsonrpc: "2.0", id: i + 1, method: "tools/call", params: request })}\n`,
+    );
+    expect(result.code).toBe(0);
+    expect(result.error).toBe("");
+    const answer = JSON.parse(result.output);
+    expect(answer.result.isError).not.toBe(true);
+    expect(result.output).not.toContain("unsafe-relative-key");
+  }
+  expect(received).toBe(0);
+});
+
+test("CLI and MCP analysis authenticate through the optional reference without disclosing it", async () => {
+  const key = "synthetic-process-private-key";
+  const keyPath = join(home, ".config/slack-cli/app-key");
+  writeFileSync(keyPath, `${key}\n`, { mode: 0o600 });
+  const configPath = join(home, ".config/slack-cli/model.json");
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      baseURL: `http://127.0.0.1:${model?.port}/v1`,
+      model: "synthetic",
+      timeout_ms: 1000,
+      api_key_file: keyPath,
+    }),
+    { mode: 0o600 },
+  );
+  expectedApiKey = key;
+  const cli = await command(["analyze", "thread", "CTEST1", root]);
+  expect(cli.code).toBe(0);
+  expect(cli.error).toBe("");
+  expect(JSON.parse(cli.output).human_review_required).toBe(true);
+  const mcp = await command(
+    ["mcp"],
+    `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "local_analyze", arguments: { channel_id: "CTEST1", root_ts: root } } })}\n`,
+  );
+  expect(mcp.code).toBe(0);
+  expect(JSON.parse(mcp.output).result.isError).not.toBe(true);
+  expect(authorizationList).toEqual([`Bearer ${key}`, `Bearer ${key}`]);
+  for (const output of [cli.output, cli.error, mcp.output, mcp.error]) {
+    expect(output).not.toContain(key);
+    expect(output).not.toContain(keyPath);
+  }
+});
+
+test("MCP wrong-key failure is one request, reflects no secret and never bypasses auth", async () => {
+  const keyPath = join(home, ".config/slack-cli/app-key");
+  writeFileSync(keyPath, "synthetic-wrong-process-key", { mode: 0o600 });
+  writeFileSync(
+    join(home, ".config/slack-cli/model.json"),
+    JSON.stringify({
+      baseURL: `http://127.0.0.1:${model?.port}/v1`,
+      model: "synthetic",
+      timeout_ms: 1000,
+      api_key_file: keyPath,
+    }),
+    { mode: 0o600 },
+  );
+  expectedApiKey = "synthetic-correct-process-key";
+  const mcp = await command(
+    ["mcp"],
+    `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "local_analyze", arguments: { channel_id: "CTEST1", root_ts: root } } })}\n`,
+  );
+  expect(mcp.code).toBe(0);
+  expect(JSON.parse(mcp.output).result.isError).toBe(true);
+  expect(mcp.output).toContain("Local model HTTP 401");
+  expect(mcp.output).not.toContain(expectedApiKey);
+  expect(mcp.output).not.toContain("synthetic-wrong-process-key");
+  expect(mcp.output).not.toContain(keyPath);
+  expect(received).toBe(1);
+});
+
+test("MCP gateway batch overload is busy data while foreground is explicit isError", async () => {
+  const keyPath = join(home, ".config/slack-cli/app-key");
+  const key = "synthetic-gateway-process-key";
+  writeFileSync(keyPath, key, { mode: 0o600 });
+  writeFileSync(
+    join(home, ".config/slack-cli/model.json"),
+    JSON.stringify({
+      baseURL: `http://127.0.0.1:${model?.port}/v1`,
+      model: "synthetic",
+      timeout_ms: 1000,
+      api_key_file: keyPath,
+      admission: "gateway",
+    }),
+    { mode: 0o600 },
+  );
+  expectedApiKey = key;
+  gatewayBusyResponse = true;
+  const batch = await command(
+    ["mcp"],
+    `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "local_analyze", arguments: { channel_id: "CTEST1", root_ts: root, mode: "batch" } } })}\n`,
+  );
+  expect(batch.code).toBe(0);
+  const batchResult = JSON.parse(batch.output).result;
+  expect(batchResult.isError).not.toBe(true);
+  expect(JSON.parse(batchResult.content[0].text).status).toBe("busy");
+  const foreground = await command(
+    ["mcp"],
+    `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "local_analyze", arguments: { channel_id: "CTEST1", root_ts: root } } })}\n`,
+  );
+  expect(foreground.code).toBe(0);
+  expect(JSON.parse(foreground.output).result.isError).toBe(true);
+  expect(foreground.output).toContain("retry later");
+  expect(received).toBe(2);
+  expect(batch.output + foreground.output).not.toContain("synthetic private prompt");
+  expect(batch.output + foreground.output).not.toContain(key);
 });

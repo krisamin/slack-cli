@@ -1,5 +1,13 @@
 import type { ChatMessage, ModelConfig, RunMode, ToolCall, Transport } from "./model";
-import { acquireModel, batchBusy, jsonResponse, makeTransport, parseMode, readModelConfig } from "./model";
+import {
+  acquireModel,
+  batchBusy,
+  GatewayBusyError,
+  makeTransport,
+  modelResponse,
+  parseMode,
+  readModelConfig,
+} from "./model";
 import { makeLocalReader } from "./read";
 import type { LocalMessage, LocalStore, ThreadResult } from "./store";
 import { parseSearch, parseThread } from "./store";
@@ -234,21 +242,28 @@ const runAnalysis = async (input: AnalyzeInput | AskInput, dependency: AnalysisD
     const abort = new AbortController();
     const totalBudget = mode === "batch" ? 30_000 : 120_000;
     const startedAt = Date.now();
-    const boundedTransport = async (path: string, init: RequestInit): Promise<Response> => {
+    const boundedResponse = async (path: string, init: RequestInit): Promise<unknown> => {
       const left = totalBudget - (Date.now() - startedAt);
       if (left <= 0) throw new Error("Analysis exceeded its total time budget.");
+      const budget = Math.min(config.timeout_ms, left);
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         return await Promise.race([
-          transport(path, { ...init, signal: abort.signal }),
+          (async () => {
+            const started = Date.now();
+            const response = await transport(path, { ...init, signal: abort.signal });
+            try {
+              return await modelResponse(response, config, Math.max(1, budget - (Date.now() - started)));
+            } catch (error) {
+              abort.abort();
+              throw error;
+            }
+          })(),
           new Promise<never>((_, reject) => {
-            timer = setTimeout(
-              () => {
-                abort.abort();
-                reject(new Error("Analysis inference timed out."));
-              },
-              Math.min(config.timeout_ms, left),
-            );
+            timer = setTimeout(() => {
+              abort.abort();
+              reject(new Error("Analysis inference timed out."));
+            }, budget);
           }),
         ]);
       } finally {
@@ -256,7 +271,11 @@ const runAnalysis = async (input: AnalyzeInput | AskInput, dependency: AnalysisD
       }
     };
     const freshness = await store.freshness();
-    if (mode === "batch" && (await (dependency.isBatchBusy ?? (() => batchBusy(config)))())) {
+    if (
+      mode === "batch" &&
+      config.admission !== "gateway" &&
+      (await (dependency.isBatchBusy ?? (() => batchBusy(config)))())
+    ) {
       return {
         status: "busy" as const,
         mode,
@@ -315,33 +334,30 @@ const runAnalysis = async (input: AnalyzeInput | AskInput, dependency: AnalysisD
       if (Date.now() - startedAt > totalBudget) throw new Error("Analysis exceeded its total time budget.");
       if (contextSize > TOTAL_CONTEXT_MAX) throw new Error("Analysis context exceeds the cumulative budget.");
       const response = record(
-        await jsonResponse(
-          await boundedTransport("/chat/completions", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              model: config.model,
-              messages: messageList,
-              ...(finalPhase
-                ? {
-                    response_format: {
-                      type: "json_schema",
-                      json_schema: { name: "slack_local_status", strict: true, schema: STATUS_SCHEMA },
-                    },
-                  }
-                : {
-                    tools: MODEL_TOOL_LIST,
-                    tool_choice: searched && threadList.length ? "auto" : "required",
-                    parallel_tool_calls: false,
-                  }),
-              temperature: 0,
-              seed: 42,
-              max_tokens: config.max_tokens,
-              chat_template_kwargs: { enable_thinking: think },
-            }),
+        await boundedResponse("/chat/completions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: config.model,
+            messages: messageList,
+            ...(finalPhase
+              ? {
+                  response_format: {
+                    type: "json_schema",
+                    json_schema: { name: "slack_local_status", strict: true, schema: STATUS_SCHEMA },
+                  },
+                }
+              : {
+                  tools: MODEL_TOOL_LIST,
+                  tool_choice: searched && threadList.length ? "auto" : "required",
+                  parallel_tool_calls: false,
+                }),
+            temperature: 0,
+            seed: 42,
+            max_tokens: config.max_tokens,
+            chat_template_kwargs: { enable_thinking: think },
           }),
-          Math.max(1, Math.min(config.timeout_ms, totalBudget - (Date.now() - startedAt))),
-        ),
+        }),
       );
       if (!Array.isArray(response.choices) || response.choices.length !== 1)
         throw new Error("Local model returned invalid choices.");
@@ -445,6 +461,16 @@ const runAnalysis = async (input: AnalyzeInput | AskInput, dependency: AnalysisD
       };
     }
     throw new Error("Model exceeded its iteration budget without a final result.");
+  } catch (error) {
+    if (mode === "batch" && error instanceof GatewayBusyError) {
+      return {
+        status: "busy" as const,
+        mode,
+        reason: "Inference gateway admission is busy; batch skipped without queueing or retry.",
+        freshness: await store.freshness(),
+      };
+    }
+    throw error;
   } finally {
     release?.();
   }
