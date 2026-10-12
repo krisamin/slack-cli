@@ -295,7 +295,12 @@ test("gateway connection failure stays an error and clears the local lock", asyn
 test("delayed headers and a never-ending body share one request deadline and abort", async () => {
   let aborted = false;
   let canceled = false;
+  let resolveCanceled: (() => void) | undefined;
+  const cancelObserved = new Promise<void>((resolve) => {
+    resolveCanceled = resolve;
+  });
   const started = performance.now();
+  let requestStartedAt = started;
   await expect(
     analyzeThread(
       { channel_id: channel, root_ts: root },
@@ -304,6 +309,7 @@ test("delayed headers and a never-ending body share one request deadline and abo
         config: { baseURL: "http://127.0.0.1:18080/v1", model: "synthetic", timeout_ms: 100, max_tokens: 1800 },
         lockDirectory: join(directory, "lock"),
         transport: async (_path, init) => {
+          requestStartedAt = performance.now();
           init.signal?.addEventListener(
             "abort",
             () => {
@@ -319,6 +325,7 @@ test("delayed headers and a never-ending body share one request deadline and abo
               },
               cancel() {
                 canceled = true;
+                resolveCanceled?.();
               },
             }),
           );
@@ -326,8 +333,30 @@ test("delayed headers and a never-ending body share one request deadline and abo
       },
     ),
   ).rejects.toThrow("timed out");
-  expect(performance.now() - started).toBeLessThan(150);
+  const rejectedAt = performance.now();
+  console.error(
+    JSON.stringify({
+      deadline_test: "delayed-body",
+      setup_ms: requestStartedAt - started,
+      request_ms: rejectedAt - requestStartedAt,
+    }),
+  );
+  expect(rejectedAt - requestStartedAt).toBeLessThan(150);
   expect(aborted).toBe(true);
+  // Public rejection/abort and the underlying stream's cancel callback settle
+  // on separate promise branches. Keep the request deadline assertion above;
+  // only wait for observing cleanup, with an independent finite bound.
+  let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      cancelObserved,
+      new Promise<never>((_, reject) => {
+        cancelTimer = setTimeout(() => reject(new Error("Body cancellation was not observed within 100ms.")), 100);
+      }),
+    ]);
+  } finally {
+    clearTimeout(cancelTimer);
+  }
   expect(canceled).toBe(true);
 });
 

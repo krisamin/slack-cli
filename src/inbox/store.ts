@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS message (
 );
 CREATE INDEX IF NOT EXISTS message_thread ON message (channel_id, thread_ts);
 CREATE INDEX IF NOT EXISTS message_ts ON message (ts);
+-- Reader search defaults to human, nondeleted messages. Keep the partial
+-- ordering index owned by the collector; readonly readers never create it.
+CREATE INDEX IF NOT EXISTS message_human_ts ON message (ts) WHERE deleted=0 AND bot=0;
 CREATE TABLE IF NOT EXISTS thread (
   channel_id TEXT NOT NULL,
   root_ts TEXT NOT NULL,

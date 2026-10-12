@@ -244,7 +244,11 @@ export class LocalStore {
       const limit = input.limit ?? 20;
       const count =
         this.db
-          .query<{ n: number }, (string | number)[]>(`SELECT COUNT(*) n FROM (${candidateSql})`)
+          // Only cardinality of the bounded metadata population matters here.
+          // Keep projection and ordering out of this independent count query.
+          .query<{ n: number }, (string | number)[]>(
+            `SELECT COUNT(*) n FROM (SELECT 1 FROM message WHERE ${filter.join(" AND ")} LIMIT ?)`,
+          )
           .get(...bind, SCAN_MAX + 1)?.n ?? 0;
       const termList = input.query?.trim().split(/\s+/) ?? [];
       const termFilter = termList.length ? termList.map(() => "instr(lower(text),lower(?))>0").join(" AND ") : "1=1";
