@@ -104,7 +104,20 @@ test("MCP tools/list preserves existing definitions and lists strict local tools
   const result = await command(["mcp"], `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })}\n`);
   expect(result.code).toBe(0);
   expect(result.error).toBe("");
-  const toolList = JSON.parse(result.output).result.tools as { name: string; inputSchema: Record<string, unknown> }[];
+  const toolList = JSON.parse(result.output).result.tools as {
+    name: string;
+    inputSchema: Record<string, unknown>;
+    _meta?: Record<string, unknown>;
+  }[];
+  expect(toolList.length).toBe(12);
+  for (const tool of toolList) {
+    if (["local_ask", "local_analyze"].includes(tool.name)) {
+      expect(tool._meta).toEqual({ "ax.ara/timeoutMs": 150_000 });
+    } else {
+      expect(tool._meta).toBeUndefined();
+    }
+  }
+  expect(received).toBe(0);
   expect(toolList.some((tool) => tool.name === "draft_write")).toBe(true);
   expect(toolList.find((tool) => tool.name === "local_ask")?.inputSchema.additionalProperties).toBe(false);
 });

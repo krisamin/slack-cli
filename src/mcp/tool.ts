@@ -10,6 +10,7 @@ export interface ToolDefinition {
   description: string;
   inputSchema: Record<string, unknown>;
   annotations?: Record<string, boolean>;
+  _meta?: Record<string, unknown>;
   run: (input: Record<string, unknown>) => Promise<string>;
 }
 
@@ -115,6 +116,7 @@ export const TOOL_LIST: ToolDefinition[] = [
       required: ["channel_id", "root_ts"],
     },
     annotations: LOCAL_ANNOTATION,
+    _meta: { "ax.ara/timeoutMs": 150_000 },
     run: localAnalyze,
   },
   {
@@ -128,6 +130,7 @@ export const TOOL_LIST: ToolDefinition[] = [
       required: ["question"],
     },
     annotations: LOCAL_ANNOTATION,
+    _meta: { "ax.ara/timeoutMs": 150_000 },
     run: localAsk,
   },
   {

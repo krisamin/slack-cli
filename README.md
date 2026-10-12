@@ -266,6 +266,11 @@ spawned from a shell that never sourced your profile, so `~/.bun/bin` is not on
 `PATH`, and `slack` starts with `#!/usr/bin/env bun`: pointing the host straight
 at it fails with `env: 'bun': No such file or directory`.
 
+Only `local_ask` and `local_analyze` advertise `_meta["ax.ara/timeoutMs"] = 150000` to ara device hosts. This transport allowance leaves room outside the
+analysis foreground limit of 120 seconds; it does not increase the model or
+batch budgets. Raw local reads and the seven existing tools declare no override.
+Other MCP hosts may ignore this optional extension and set their own deadlines.
+
 The server advertises readonly annotations for local tools, distinguishes explicit
 null request IDs from notifications, and drains pending calls after stdin EOF.
 The server implements `initialize`, `tools/list`, `tools/call` and `ping` by

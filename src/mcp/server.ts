@@ -72,6 +72,7 @@ const handleMethod = async (method: string, params: Record<string, unknown>): Pr
           name: tool.name,
           description: tool.description,
           inputSchema: tool.inputSchema,
+          ...(tool._meta ? { _meta: tool._meta } : {}),
           ...(tool.annotations ? { annotations: tool.annotations } : {}),
         })),
       };
